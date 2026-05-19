@@ -351,4 +351,4 @@ The cataloging prompt lives in `skill.md` at the project root. You can customize
 
 ## License
 
-MIT
+GNU General Public License v3.0 - see [LICENSE](LICENSE) for details.
