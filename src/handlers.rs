@@ -50,6 +50,14 @@ impl ApiError {
     pub fn quota(msg: impl Into<String>) -> Self {
         Self { error: msg.into(), status: 413 }
     }
+
+    pub fn gone(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), status: 410 }
+    }
+
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), status: 400 }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -485,7 +493,7 @@ pub async fn ask_handler(
     let space = resolve_space(&state, token).await?;
 
     if body.question.trim().is_empty() {
-        return Err(ApiError::new("Question cannot be empty"));
+        return Err(ApiError::bad_request("Question cannot be empty"));
     }
 
     let query_embedding = catalog::get_embedding(&state.client, &state.config, &body.question)
@@ -562,7 +570,14 @@ pub async fn archive_download_handler(
         .spaces
         .get_archive_info(&download_token)
         .await
-        .map_err(|e| ApiError::new(format!("Archive error: {}", e)))?
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("already downloaded") {
+                ApiError::gone(msg)
+            } else {
+                ApiError::new(msg)
+            }
+        })?
         .ok_or_else(|| ApiError::not_found("Archive not found"))?;
 
     if !required_token.is_empty() {
