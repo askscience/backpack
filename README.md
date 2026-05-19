@@ -10,6 +10,7 @@ A production-ready personal cloud tool that uses an external LLM to automaticall
 - **RAG Q&A**: Ask questions about your files — relevant content is retrieved and used as context for the LLM
 - **Full CRUD**: Upload, search, ask, list inventory, download, delete
 - **Iroh P2P**: Peer-to-peer connectivity via the [Iroh](https://iroh.computer) protocol — share a single ticket string to grant access. Encrypted QUIC, DHT-based discovery, no public relays, no IP in the invite
+- **Multi-user spaces**: Create fully isolated spaces per person — separate SQLite, embeddings, files, and quota. Share a space with others via share tokens. Archive and purge spaces with one-time download links.
 - **Docker-ready**: Multi-stage Dockerfile with Tesseract OCR, ffmpeg, and Vosk speech recognition
 
 ## Architecture
@@ -85,6 +86,15 @@ Upload a file (multipart form-data, field name `file`).
 ```bash
 curl -X POST http://localhost:8080/upload \
   -F "file=@document.pdf"
+
+# With space token (multi-user)
+curl -X POST "http://localhost:8080/upload?token=abc123..." \
+  -F "file=@document.pdf"
+
+# Batch upload (multiple files in one request)
+curl -X POST http://localhost:8080/upload \
+  -F "file=@doc1.pdf" \
+  -F "file=@doc2.pdf"
 ```
 
 Response:
@@ -176,6 +186,17 @@ Delete a file and its metadata.
 
 ```bash
 curl -X DELETE http://localhost:8080/files/a1b2c3d4-...
+
+# With token
+curl -X DELETE "http://localhost:8080/files/a1b2c3d4-...?token=abc123"
+```
+
+### `GET /archive/dl/{token}`
+
+Download a space archive (one-time link, expires after 24h).
+
+```bash
+curl -O "http://localhost:8080/archive/dl/V1b2c3d4?token=xk9m3p"
 ```
 
 ## Iroh P2P Connectivity
@@ -285,6 +306,145 @@ backpack --iroh                # Iroh binds random port, auto-published to DHT
 # Client  
 backpack-cli --port 3000 <ticket>   # Proxy on :3000 instead of :9090
 ```
+
+## Multi-User Spaces
+
+Create fully isolated spaces for different people or projects. Each space has its own SQLite database, upload directory, embeddings, and quota — users in one space never see files from another.
+
+### Architecture
+
+```
+backpack/
+├── spaces/
+│   ├── spaces.db              # registry of all spaces
+│   ├── archives/              # Zipped spaces before deletion
+│   └── <space_id>/            # one directory per space
+│       ├── backpack.db        # isolated SQLite + embeddings
+│       └── uploads/           # user files
+├── uploads/                   # default (owner) space
+└── data/backpack.db           # default SQLite
+```
+
+### Create a space
+
+```
+backpack space create --label "bob-project" --quota 500
+```
+
+Output:
+```json
+{
+  "space_id": "a1b2c3d4...",
+  "label": "bob-project",
+  "owner_token": "e5f6g7h8i9j0...",
+  "quota_mb": 500,
+  "upload_dir": "./spaces/a1b2c3d4/uploads"
+}
+```
+
+The `owner_token` is the access key. Share it with the person who will use this space.
+
+### Share a space
+
+Give another person access to the **same** space (same files, same quota):
+
+```
+backpack space share e5f6g7h8i9j0... --label "bob"
+```
+
+```json
+{
+  "share_token": "xk9m3p...",
+  "label": "bob",
+  "space_label": "bob-project"
+}
+```
+
+Sharing does not increase or change the quota — all users of a space draw from the same MB limit.
+
+### Use a space (API)
+
+Every API call carries the token as a query parameter:
+
+```bash
+# Upload to Bob's space
+curl -X POST "http://localhost:8080/upload?token=e5f6g7h8i9j0..." \
+  -F "file=@report.pdf"
+
+# Search in Bob's space
+curl "http://localhost:8080/search?token=e5f6g7h8i9j0...&q=report"
+
+# Inventory for Bob
+curl "http://localhost:8080/inventory?token=e5f6g7h8i9j0..."
+```
+
+No token = uses the default (owner's own) space.
+
+### List spaces
+
+```
+backpack space list
+```
+
+```
+  a1b2c3d4...     154.0 /  500 MB  active    shares: 1  label: bob-project
+```
+
+### Space info
+
+```
+backpack space info e5f6g7h8i9j0...
+```
+
+```json
+{
+  "id": "a1b2c3d4...",
+  "label": "bob-project",
+  "quota_mb": 500,
+  "used_mb": 154.2,
+  "status": "active",
+  "shares": [
+    {"share_token": "xk9m3p...", "label": "bob", "can_write": true}
+  ],
+  "archives": [],
+  "created_at": "2026-05-19 10:00:00"
+}
+```
+
+### Delete a space
+
+**Permanent wipe:**
+```
+backpack space delete e5f6g7h8i9j0... --purge
+```
+Deletes all files, database, embeddings. No recovery.
+
+**Archive before deleting:**
+```
+backpack space delete e5f6g7h8i9j0... --archive --for-share xk9m3p
+```
+1. Space is frozen (no more uploads)
+2. All files + SQLite are zipped into `./spaces/archives/<space_id>.zip`
+3. A one-time download URL is generated
+4. The URL is restricted to the specified share token
+5. After 24 hours (or after download), the ZIP is removed and the space is purged
+
+### Archive download
+
+```
+curl -O "http://localhost:8080/archive/dl/V1b2c3d4?token=xk9m3p"
+```
+
+### Quota
+
+Set at creation time with `--quota <mb>`. 0 = unlimited. If a file exceeds the remaining quota, the upload is rejected with HTTP 413. Deleting files reclaims quota.
+
+| API Response | Meaning |
+|-------------|---------|
+| 200 OK | Success |
+| 403 Forbidden | Invalid space token |
+| 413 Content Too Large | Quota exceeded |
+| 404 Not Found | File or space not found |
 
 ## Provider-Specific Setup
 

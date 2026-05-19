@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 use crate::catalog;
 use crate::config::Config;
 use crate::db::{self, FileRecord, f32_vec_to_bytes};
+use crate::spaces::{SpaceHandle, SpaceManager};
 use crate::vector;
 
 #[derive(Clone)]
@@ -23,23 +24,38 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub config: Arc<Config>,
     pub client: Client,
+    pub spaces: Arc<SpaceManager>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ApiError {
     error: String,
+    pub status: u16,
 }
 
 impl ApiError {
     pub fn new(msg: impl Into<String>) -> Self {
-        Self { error: msg.into() }
+        Self { error: msg.into(), status: 500 }
+    }
+
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), status: 404 }
+    }
+
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), status: 403 }
+    }
+
+    pub fn quota(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), status: 413 }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
+        let code = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let body = serde_json::json!({"error": self.error});
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        (code, Json(body)).into_response()
     }
 }
 
@@ -48,6 +64,11 @@ impl From<anyhow::Error> for ApiError {
         error!("{:?}", e);
         ApiError::new(e.to_string())
     }
+}
+
+#[derive(Deserialize)]
+pub struct TokenQuery {
+    pub token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +106,7 @@ pub struct SearchResponse {
 #[derive(Deserialize)]
 pub struct SearchQuery {
     pub q: String,
+    pub token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -105,10 +127,21 @@ pub struct SourceInfo {
     pub summary: Option<String>,
 }
 
+async fn resolve_space(state: &AppState, token: Option<String>) -> Result<SpaceHandle, ApiError> {
+    state
+        .spaces
+        .resolve(token.as_deref())
+        .await
+        .map_err(|e| ApiError::forbidden(format!("Invalid space token: {}", e)))
+}
+
 pub async fn upload_handler(
     State(state): State<AppState>,
+    Query(TokenQuery { token }): Query<TokenQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<BatchUploadResponse>, ApiError> {
+    let space = resolve_space(&state, token).await?;
+
     let mut files: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
 
     while let Some(field) = multipart
@@ -133,16 +166,30 @@ pub async fn upload_handler(
         return Err(ApiError::new("No file provided"));
     }
 
+    let total_bytes: u64 = files.iter().map(|(_, d, _)| d.len() as u64).sum();
+    if !state
+        .spaces
+        .check_quota(&space.space_id, total_bytes)
+        .await
+        .map_err(|e| ApiError::new(e.to_string()))?
+    {
+        return Err(ApiError::quota("Quota exceeded"));
+    }
+
     let siblings: Vec<String> = files.iter().map(|(n, _, _)| n.clone()).collect();
 
     let mut results = Vec::with_capacity(files.len());
     for (original_name, data, content_type) in files {
-        let others: Vec<&str> = siblings.iter().filter(|&s| *s != original_name).map(|s| s.as_str()).collect();
-        match process_single_file(&state, original_name, data, content_type, &others).await {
+        let others: Vec<&str> =
+            siblings.iter().filter(|&s| *s != original_name).map(|s| s.as_str()).collect();
+        match process_single_file(&state, &space, original_name, data, content_type, &others).await {
             Ok(response) => results.push(response),
             Err(e) => warn!("Failed to process file: {:?}", e),
         }
     }
+
+    let total_saved: u64 = results.iter().map(|r| r.file_size as u64).sum();
+    let _ = state.spaces.add_usage(&space.space_id, total_saved).await;
 
     Ok(Json(BatchUploadResponse {
         total_files: results.len(),
@@ -152,6 +199,7 @@ pub async fn upload_handler(
 
 async fn process_single_file(
     state: &AppState,
+    space: &SpaceHandle,
     original_name: String,
     file_data: Vec<u8>,
     content_type: Option<String>,
@@ -173,17 +221,18 @@ async fn process_single_file(
 
     let id = uuid::Uuid::new_v4().to_string();
     let safe_name = sanitize_filename(&original_name);
-    let file_dir = format!("{}/{}", state.config.upload_dir, id);
+    let file_dir = format!("{}/{}", space.upload_dir, id);
     fs::create_dir_all(&file_dir)
         .await
         .map_err(|e| ApiError::new(format!("Failed to create upload dir: {}", e)))?;
 
     let file_path = format!("{}/{}", file_dir, &safe_name);
+    let file_size = file_data.len() as i64;
+
     fs::write(&file_path, &file_data)
         .await
         .map_err(|e| ApiError::new(format!("Failed to write file: {}", e)))?;
 
-    let file_size = file_data.len() as i64;
     info!(
         "File saved: id={}, name={}, size={}",
         id, original_name, file_size
@@ -197,10 +246,7 @@ async fn process_single_file(
         });
 
     let extracted_len = extracted_text.len();
-    info!(
-        "Extracted {} chars from {}",
-        extracted_len, original_name
-    );
+    info!("Extracted {} chars from {}", extracted_len, original_name);
 
     let catalog_text = if siblings.is_empty() {
         extracted_text.clone()
@@ -219,16 +265,10 @@ async fn process_single_file(
                     let tags_str = entry.tags.join(", ");
                     let catalog_str = serde_json::to_string(&entry).unwrap_or_default();
 
-                    let embed_text = format!(
-                        "{} — {} — {}",
-                        entry.title, entry.summary, tags_str
-                    );
-                    let emb_result = catalog::get_embedding(
-                        &state.client,
-                        &state.config,
-                        &embed_text,
-                    )
-                    .await;
+                    let embed_text =
+                        format!("{} — {} — {}", entry.title, entry.summary, tags_str);
+                    let emb_result =
+                        catalog::get_embedding(&state.client, &state.config, &embed_text).await;
 
                     let title_val = entry.title;
                     let summary_val = entry.summary;
@@ -287,7 +327,7 @@ async fn process_single_file(
         created_at: now.clone(),
     };
 
-    db::insert_file(&state.pool, &record)
+    db::insert_file(&space.pool, &record)
         .await
         .map_err(|e| ApiError::new(format!("Failed to save file record: {}", e)))?;
 
@@ -317,6 +357,8 @@ pub async fn search_handler(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
+    let space = resolve_space(&state, query.token).await?;
+
     if query.q.trim().is_empty() {
         return Ok(Json(SearchResponse {
             query: query.q,
@@ -328,7 +370,7 @@ pub async fn search_handler(
         .await
         .map_err(|e| ApiError::new(format!("Embedding failed: {}", e)))?;
 
-    let results = vector::search_similar(&state.pool, &embedding, 10)
+    let results = vector::search_similar(&space.pool, &embedding, 10)
         .await
         .map_err(|e| ApiError::new(format!("Search failed: {}", e)))?;
 
@@ -340,8 +382,11 @@ pub async fn search_handler(
 
 pub async fn inventory_handler(
     State(state): State<AppState>,
+    Query(TokenQuery { token }): Query<TokenQuery>,
 ) -> Result<Json<InventoryResponse>, ApiError> {
-    let categories = db::list_files_grouped(&state.pool)
+    let space = resolve_space(&state, token).await?;
+
+    let categories = db::list_files_grouped(&space.pool)
         .await
         .map_err(|e| ApiError::new(format!("Failed to list files: {}", e)))?;
 
@@ -355,23 +400,29 @@ pub async fn inventory_handler(
 
 pub async fn download_handler(
     State(state): State<AppState>,
+    Query(TokenQuery { token }): Query<TokenQuery>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let file = db::get_file(&state.pool, &id)
+    let space = resolve_space(&state, token).await?;
+
+    let file = db::get_file(&space.pool, &id)
         .await
         .map_err(|e| ApiError::new(format!("DB error: {}", e)))?
-        .ok_or_else(|| ApiError::new("File not found"))?;
+        .ok_or_else(|| ApiError::not_found("File not found"))?;
 
     if !std::path::Path::new(&file.file_path).exists() {
-        return Err(ApiError::new("File not found on disk"));
+        return Err(ApiError::not_found("File not found on disk"));
     }
 
     async {
-        let data = tokio::fs::read(&file.file_path).await.map_err(|e| {
-            ApiError::new(format!("Failed to read file: {}", e))
-        })?;
+        let data = tokio::fs::read(&file.file_path)
+            .await
+            .map_err(|e| ApiError::new(format!("Failed to read file: {}", e)))?;
 
-        let mime: mime_guess::Mime = file.mime.parse().unwrap_or(mime_guess::mime::APPLICATION_OCTET_STREAM);
+        let mime: mime_guess::Mime = file
+            .mime
+            .parse()
+            .unwrap_or(mime_guess::mime::APPLICATION_OCTET_STREAM);
 
         let filename = file.original_name.clone();
         let headers = [
@@ -389,12 +440,17 @@ pub async fn download_handler(
 
 pub async fn delete_handler(
     State(state): State<AppState>,
+    Query(TokenQuery { token }): Query<TokenQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let file = db::get_file(&state.pool, &id)
+    let space = resolve_space(&state, token).await?;
+
+    let file = db::get_file(&space.pool, &id)
         .await
         .map_err(|e| ApiError::new(format!("DB error: {}", e)))?
-        .ok_or_else(|| ApiError::new("File not found"))?;
+        .ok_or_else(|| ApiError::not_found("File not found"))?;
+
+    let file_size = file.file_size;
 
     let file_dir = std::path::Path::new(&file.file_path)
         .parent()
@@ -406,9 +462,11 @@ pub async fn delete_handler(
         }
     }
 
-    db::delete_file(&state.pool, &id)
+    db::delete_file(&space.pool, &id)
         .await
         .map_err(|e| ApiError::new(format!("Failed to delete file record: {}", e)))?;
+
+    let _ = state.spaces.add_usage(&space.space_id, (-file_size as i64) as u64).await;
 
     info!("Deleted file: id={}, name={}", id, file.original_name);
 
@@ -420,8 +478,11 @@ pub async fn delete_handler(
 
 pub async fn ask_handler(
     State(state): State<AppState>,
+    Query(TokenQuery { token }): Query<TokenQuery>,
     Json(body): Json<AskRequest>,
 ) -> Result<Json<AskResponse>, ApiError> {
+    let space = resolve_space(&state, token).await?;
+
     if body.question.trim().is_empty() {
         return Err(ApiError::new("Question cannot be empty"));
     }
@@ -431,7 +492,7 @@ pub async fn ask_handler(
         .map_err(|e| ApiError::new(format!("Embedding failed: {}", e)))?;
 
     let search_results =
-        vector::search_similar(&state.pool, &query_embedding, 5).await?;
+        vector::search_similar(&space.pool, &query_embedding, 5).await?;
 
     let sources: Vec<SourceInfo> = search_results
         .iter()
@@ -443,7 +504,7 @@ pub async fn ask_handler(
         .collect();
 
     let ids: Vec<String> = search_results.iter().map(|r| r.id.clone()).collect();
-    let full_texts = db::get_full_texts(&state.pool, &ids)
+    let full_texts = db::get_full_texts(&space.pool, &ids)
         .await
         .map_err(|e| ApiError::new(format!("Failed to fetch file texts: {}", e)))?;
 
@@ -478,11 +539,62 @@ fn build_rag_context(files: &[db::FileRecord]) -> String {
         let text = &file.extracted_text;
         let max_text_len = 3000usize;
         let display_text = if text.len() > max_text_len {
-            format!("{}... [truncated, full text {} chars]", &text[..max_text_len], text.len())
+            format!(
+                "{}... [truncated, full text {} chars]",
+                &text[..max_text_len],
+                text.len()
+            )
         } else {
             text.clone()
         };
         ctx.push_str(&format!("Content:\n{}\n\n", display_text));
     }
     ctx
+}
+
+pub async fn archive_download_handler(
+    State(state): State<AppState>,
+    Path(download_token): Path<String>,
+    Query(TokenQuery { token }): Query<TokenQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (zip_path, expires_at, required_token) = state
+        .spaces
+        .get_archive_info(&download_token)
+        .await
+        .map_err(|e| ApiError::new(format!("Archive error: {}", e)))?
+        .ok_or_else(|| ApiError::not_found("Archive not found"))?;
+
+    if !required_token.is_empty() {
+        let provided = token.unwrap_or_default();
+        if provided != required_token {
+            return Err(ApiError::forbidden("Access denied for this archive"));
+        }
+    }
+
+    let expiry = chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|t| t.and_utc().timestamp());
+    let now = chrono::Utc::now().timestamp();
+    if let Some(exp) = expiry {
+        if now > exp {
+            return Err(ApiError::forbidden("Archive download link expired"));
+        }
+    }
+
+    let data = tokio::fs::read(&zip_path)
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to read archive: {}", e)))?;
+
+    let filename = format!("{}.zip", download_token);
+    let headers = [
+        (header::CONTENT_TYPE, "application/zip".to_string()),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        ),
+    ];
+
+    let _ = state.spaces.mark_archive_downloaded(&download_token).await;
+
+    Ok((headers, data))
 }

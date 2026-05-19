@@ -91,6 +91,40 @@ pub async fn init_db(db_url: &str) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+pub async fn init_db_pool(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS files (
+            id TEXT PRIMARY KEY,
+            original_name TEXT NOT NULL,
+            mime TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            extracted_text TEXT NOT NULL DEFAULT '',
+            title TEXT,
+            summary TEXT,
+            tags TEXT,
+            category TEXT,
+            catalog_json TEXT,
+            embedding BLOB,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_files_category ON files(category);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn insert_file(pool: &SqlitePool, record: &FileRecord) -> Result<()> {
     sqlx::query(
         r#"
