@@ -21,6 +21,7 @@ use crate::vector;
 
 #[derive(Clone)]
 pub struct AppState {
+    #[allow(dead_code)]
     pub pool: SqlitePool,
     pub config: Arc<Config>,
     pub client: Client,

@@ -14,7 +14,9 @@ pub struct SpaceHandle {
     pub space_id: String,
     pub pool: SqlitePool,
     pub upload_dir: String,
+    #[allow(dead_code)]
     pub quota_bytes: u64,
+    #[allow(dead_code)]
     pub iroh_ticket: Option<String>,
 }
 
@@ -562,6 +564,7 @@ impl SpaceManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn set_space_iroh(&self, space_id: &str, ticket: &str) -> Result<()> {
         sqlx::query("UPDATE spaces SET iroh_ticket = ?1 WHERE id = ?2")
             .bind(ticket)
