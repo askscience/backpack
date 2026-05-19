@@ -30,19 +30,28 @@ Ask   → Embed question → Retrieve top-K files → LLM answers with context
 
 ## Quick Start
 
+### 0. Interactive setup (recommended)
+
+```bash
+./setup.sh
+```
+
+Prompts for your LLM provider/keys, then either starts with Docker or builds natively.
+
 ### Prerequisites
 
-- Rust 1.78+
-- Optional (for local extraction): Tesseract OCR, ffmpeg, Vosk model
+- **Docker** (for Docker mode) — https://docs.docker.com/engine/install/
+- **Rust 1.78+** (for native mode) — https://rustup.rs
+- Optional (for native extraction): Tesseract OCR, ffmpeg, Vosk model
 
-### 1. Clone and set up
+### 1. (alt) Clone and configure manually
 
 ```bash
 cp .env.example .env
 # Edit .env with your LLM API key
 ```
 
-### 2. Run with Cargo
+### 2. (alt) Run with Cargo
 
 ```bash
 cargo run --release
@@ -50,7 +59,7 @@ cargo run --release
 
 The server starts on `http://0.0.0.0:8080`.
 
-### 3. Run with Docker
+### 3. (alt) Run with Docker
 
 ```bash
 docker compose up -d
