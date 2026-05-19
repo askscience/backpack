@@ -1,0 +1,30 @@
+[package]
+name = "backpack"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "migrate"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+mime_guess = "2"
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
+anyhow = "1"
+thiserror = "2"
+chrono = "0.4"
+pdf-extract = "0.7"
+calamine = "0.25"
+epub = "2"
+mailparse = "0.15"
+zip = "0.6"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+iroh-net = { version = "0.28", features = ["discovery-pkarr-dht"] }

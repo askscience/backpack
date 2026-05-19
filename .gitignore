@@ -1,0 +1,7 @@
+/target
+/uploads/*
+!/uploads/.gitkeep
+/data/*
+!/data/.gitkeep
+.env
+.vosk_models

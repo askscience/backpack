@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  backpack:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - LLM_ENDPOINT=${LLM_ENDPOINT:-https://api.openai.com/v1}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-1536}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-100}
+      - UPLOAD_DIR=/app/uploads
+      - DB_PATH=/app/data/backpack.db
+      - SKILL_PATH=/app/skill.md
+      - VOSK_MODEL_PATH=/opt/vosk-model
+    volumes:
+      - ./uploads:/app/uploads
+      - ./data:/app/data
+      - ./skill.md:/app/skill.md:ro
+    restart: unless-stopped
