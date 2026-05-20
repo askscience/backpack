@@ -61,11 +61,11 @@ impl SyncEngine {
             }
         });
 
-        let ws_handle = {
+        tokio::spawn({
             let ws_engine = self.clone();
             let server_url = self.config.server_url.clone();
             let space_token = self.config.space_token.clone();
-            tokio::spawn(async move {
+            async move {
                 if let Some(ref token) = space_token {
                     match ws::connect(&server_url, token).await {
                         Ok((mut ws_rx, _ws_keepalive)) => {
@@ -86,13 +86,12 @@ impl SyncEngine {
                     info!("No space token, WebSocket push sync skipped");
                     std::future::pending::<()>().await;
                 }
-            })
-        };
+            }
+        });
 
         tokio::select! {
             _ = watch_handle => info!("Watch loop exited"),
             _ = poll_handle => info!("Poll loop exited"),
-            _ = ws_handle => info!("WebSocket loop exited"),
         }
 
         Ok(())

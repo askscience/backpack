@@ -495,6 +495,7 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .route("/archive/dl/:id", routing::get(handlers::archive_download_handler))
         .route("/sync-token", routing::post(handlers::sync_token_handler))
         .route("/ws", routing::get(handlers::ws_handler))
+        .route("/space/revoke-share", routing::post(handlers::revoke_share_handler))
         .route("/", routing::get(|| async {
             axum::Json(serde_json::json!({
                 "name": "AI Cloud Backpack",

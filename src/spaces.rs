@@ -272,6 +272,43 @@ impl SpaceManager {
         })
     }
 
+    /// Revoke a share token by hard-deleting it from the database.
+    /// Returns the `space_id` that the share belonged to.
+    /// Only the space owner may revoke shares — validated via `owner_token`.
+    /// After this call the share token will no longer resolve, and any
+    /// WebSocket sync clients connected via this space will be
+    /// disconnected (handled by the caller via `SyncHub`).
+    pub async fn revoke_share(&self, owner_token: &str, share_token: &str) -> Result<String> {
+        // Verify the owner_token and find the space_id via the share_token.
+        let row = sqlx::query(
+            "SELECT st.space_id FROM share_tokens st
+             JOIN spaces s ON st.space_id = s.id
+             WHERE st.share_token = ?1 AND s.owner_token = ?2 AND s.status = 'active'",
+        )
+        .bind(share_token)
+        .bind(owner_token)
+        .fetch_optional(&self.registry)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("Share not found, already revoked, or not authorized as owner")
+        })?;
+
+        let space_id: String = row.get("space_id");
+
+        sqlx::query("DELETE FROM share_tokens WHERE share_token = ?1")
+            .bind(share_token)
+            .execute(&self.registry)
+            .await?;
+
+        info!(
+            "Share revoked: space={}, share_token={}",
+            space_id,
+            &share_token[..12.min(share_token.len())]
+        );
+
+        Ok(space_id)
+    }
+
     pub async fn delete(&self, token: &str, mode: DeleteMode) -> Result<DeleteResult> {
         let info = self.find_space_by_token(token).await?;
         let space_id = info.space_id;

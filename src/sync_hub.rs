@@ -157,6 +157,49 @@ impl SyncHub {
         }
     }
 
+    /// Broadcast a "revoked" system event to all connected clients in a space.
+    /// Bypasses the `has_shares` gate — this is called AFTER the share has
+    /// been deleted, so the gate would incorrectly block the notification.
+    /// Connected clients receiving "revoked" will close their WebSocket
+    /// and fall back to poll-only mode.
+    pub async fn broadcast_revoked(&self, space_id: &str) {
+        let event = SyncEvent {
+            typ: "revoked".into(),
+            file_id: String::new(),
+            original_name: String::new(),
+            file_size: 0,
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+        };
+
+        let channels = self.channels.lock().await;
+        if let Some(sender) = channels.get(space_id) {
+            let count = sender.receiver_count();
+            debug!(
+                "Broadcasting 'revoked' to {} clients in space={}",
+                count, space_id
+            );
+            let _ = sender.send(event);
+        }
+    }
+
+    /// Remove all sync tokens issued for a space. When a share is revoked,
+    /// any remaining sync tickets should be invalidated so clients cannot
+    /// reconnect via WebSocket.
+    pub async fn revoke_space_tokens(&self, space_id: &str) {
+        let mut tickets = self.tickets.lock().await;
+        let before = tickets.len();
+        tickets.retain(|_, t| t.space_id != space_id);
+        let removed = before - tickets.len();
+        if removed > 0 {
+            info!(
+                "Revoked {} sync tokens for space={}",
+                removed, space_id
+            );
+        }
+    }
+
     /// Periodically remove expired tokens. Can be called via a background interval.
     #[allow(dead_code)]
     pub async fn purge_expired_tokens(&self) {

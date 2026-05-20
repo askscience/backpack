@@ -643,6 +643,66 @@ pub async fn sync_token_handler(
     }
 }
 
+/// Request body for the revoke-share endpoint.
+#[derive(Deserialize)]
+pub struct RevokeShareRequest {
+    /// Owner token of the space (validates ownership).
+    pub owner_token: String,
+    /// Share token to revoke.
+    pub share_token: String,
+}
+
+/// `POST /space/revoke-share`
+///
+/// Revokes a share invitation by hard-deleting the share token.
+/// Only the space owner may revoke shares. After revocation:
+/// - The share token no longer resolves for API access
+/// - All WebSocket sync clients for this space receive a "revoked"
+///   event and disconnect, falling back to poll-only mode
+/// - All in-memory sync tickets for this space are invalidated
+pub async fn revoke_share_handler(
+    State(state): State<AppState>,
+    Json(body): Json<RevokeShareRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.owner_token.is_empty() || body.share_token.is_empty() {
+        return Err(ApiError::bad_request(
+            "Both owner_token and share_token are required",
+        ));
+    }
+
+    // Validate that the owner_token is valid (resolves to a space).
+    // This also ensures the space is active.
+    let space = resolve_space(&state, Some(body.owner_token.clone())).await?;
+
+    // Hard-delete the share token. SpaceManager validates ownership
+    // by checking that the owner_token matches the space's owner.
+    let space_id = state
+        .spaces
+        .revoke_share(&body.owner_token, &body.share_token)
+        .await
+        .map_err(|e| ApiError::forbidden(format!("Revoke failed: {}", e)))?;
+
+    // The space_id from revoke_share should match the resolved one.
+    // Notify any connected WebSocket clients that they've been revoked.
+    state.sync_hub.broadcast_revoked(&space_id).await;
+
+    // Invalidate all in-memory sync tokens for this space so clients
+    // cannot reconnect via WebSocket.
+    state.sync_hub.revoke_space_tokens(&space_id).await;
+
+    info!(
+        "Share revoked: space={}, share_token={}",
+        space_id,
+        &body.share_token[..12.min(body.share_token.len())]
+    );
+
+    Ok(Json(serde_json::json!({
+        "revoked": true,
+        "space_id": space_id,
+        "share_token": body.share_token,
+    })))
+}
+
 /// Query parameters for the WebSocket endpoint.
 #[derive(Deserialize)]
 pub struct WsQuery {

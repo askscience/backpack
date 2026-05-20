@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
@@ -73,8 +75,15 @@ pub async fn connect(
 async fn ws_loop(ws_url: &str, tx: mpsc::UnboundedSender<WsSyncEvent>) {
     let mut retry_delay = 1u64;
     const MAX_RETRY_DELAY: u64 = 60;
+    let revoked = Arc::new(AtomicBool::new(false));
 
     loop {
+        // If the share was revoked, stop reconnecting permanently.
+        if revoked.load(Ordering::Relaxed) {
+            info!("Share revoked — WebSocket push sync stopped permanently");
+            return;
+        }
+
         info!("Connecting to WebSocket: {}", ws_url);
         match connect_async(ws_url).await {
             Ok((ws_stream, _response)) => {
@@ -82,6 +91,7 @@ async fn ws_loop(ws_url: &str, tx: mpsc::UnboundedSender<WsSyncEvent>) {
                 retry_delay = 1;
                 let (mut write, mut read) = ws_stream.split();
 
+                let revoked_clone = revoked.clone();
                 let read_handle = {
                     let tx = tx.clone();
                     tokio::spawn(async move {
@@ -90,6 +100,13 @@ async fn ws_loop(ws_url: &str, tx: mpsc::UnboundedSender<WsSyncEvent>) {
                                 Ok(Message::Text(text)) => {
                                     match serde_json::from_str::<WsSyncEvent>(&text) {
                                         Ok(event) => {
+                                            // "revoked" means the space share was
+                                            // revoked by the owner — stop permanently.
+                                            if event.typ == "revoked" {
+                                                info!("Received 'revoked' — owner removed share");
+                                                revoked_clone.store(true, Ordering::Relaxed);
+                                                break;
+                                            }
                                             debug!("WS event: {} file={}", event.typ, event.file_id);
                                             if tx.send(event).is_err() { break; }
                                         }
