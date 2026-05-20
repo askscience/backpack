@@ -5,3 +5,5 @@
 !/data/.gitkeep
 .env
 .vosk_models
+spaces/
+uploads/

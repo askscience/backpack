@@ -491,6 +491,26 @@ impl SpaceManager {
         })
     }
 
+    /// Check whether a space has been shared with at least one other person.
+    /// Returns `true` if there is at least one active share token for the space.
+    /// Used by the sync hub to gate real-time push — private spaces don't need
+    /// WebSocket broadcast since only one user has access.
+    pub async fn is_shared(&self, space_id: &str) -> Result<bool> {
+        if space_id == "default" || space_id.is_empty() {
+            return Ok(false);
+        }
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM share_tokens
+             JOIN spaces ON share_tokens.space_id = spaces.id
+             WHERE share_tokens.space_id = ?1 AND spaces.status = 'active'",
+        )
+        .bind(space_id)
+        .fetch_one(&self.registry)
+        .await?;
+
+        Ok(row.get::<i64, _>("cnt") > 0)
+    }
+
     pub async fn add_usage(&self, space_id: &str, bytes: u64) -> Result<()> {
         if space_id == "default" || space_id.is_empty() {
             return Ok(());

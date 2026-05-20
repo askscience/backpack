@@ -1,22 +1,24 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ws, WebSocketUpgrade, Path, Query, State},
     http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
 use axum_extra::extract::Multipart;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::fs;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::catalog;
 use crate::config::Config;
 use crate::db::{self, FileRecord, f32_vec_to_bytes};
 use crate::spaces::{SpaceHandle, SpaceManager};
+use crate::sync_hub::{SyncHub, SyncEvent};
 use crate::vector;
 
 #[derive(Clone)]
@@ -26,6 +28,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub client: Client,
     pub spaces: Arc<SpaceManager>,
+    pub sync_hub: Arc<SyncHub>,
 }
 
 #[derive(Debug, Serialize)]
@@ -340,6 +343,35 @@ async fn process_single_file(
         .await
         .map_err(|e| ApiError::new(format!("Failed to save file record: {}", e)))?;
 
+    // Broadcast the file creation to any WebSocket sync clients
+    // connected to this space. Only fires for shared spaces.
+    {
+        let space_id = space.space_id.clone();
+        let hub = state.sync_hub.clone();
+        let spaces = state.spaces.clone();
+        let record_clone = record.clone();
+
+        tokio::spawn(async move {
+            let shared = spaces
+                .is_shared(&space_id)
+                .await
+                .unwrap_or(false);
+
+            hub.broadcast(
+                &space_id,
+                shared,
+                SyncEvent {
+                    typ: "created".into(),
+                    file_id: record_clone.id,
+                    original_name: record_clone.original_name,
+                    file_size: record_clone.file_size,
+                    timestamp: record_clone.created_at,
+                },
+            )
+            .await;
+        });
+    }
+
     Ok(UploadResponse {
         id,
         original_name,
@@ -479,6 +511,37 @@ pub async fn delete_handler(
 
     info!("Deleted file: id={}, name={}", id, file.original_name);
 
+    // Broadcast the deletion to any WebSocket sync clients.
+    {
+        let space_id = space.space_id.clone();
+        let hub = state.sync_hub.clone();
+        let spaces = state.spaces.clone();
+        let file_id = id.clone();
+        let original_name = file.original_name.clone();
+
+        tokio::spawn(async move {
+            let shared = spaces
+                .is_shared(&space_id)
+                .await
+                .unwrap_or(false);
+
+            hub.broadcast(
+                &space_id,
+                shared,
+                SyncEvent {
+                    typ: "deleted".into(),
+                    file_id,
+                    original_name,
+                    file_size: file_size,
+                    timestamp: chrono::Utc::now()
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
+                },
+            )
+            .await;
+        });
+    }
+
     Ok(Json(serde_json::json!({
         "deleted": true,
         "id": id
@@ -529,6 +592,140 @@ pub async fn ask_handler(
     .map_err(|e| ApiError::new(format!("LLM query failed: {}", e)))?;
 
     Ok(Json(AskResponse { answer, sources }))
+}
+
+// ── Sync / WebSocket endpoints ─────────────────────────────────────
+
+/// Query parameters for the sync-token endpoint.
+#[derive(Deserialize)]
+pub struct SyncTokenQuery {
+    pub token: Option<String>,
+    /// Optional label to identify this client (e.g. "laptop", "desktop").
+    #[serde(default = "default_label")]
+    pub label: String,
+}
+
+fn default_label() -> String {
+    "sync-client".into()
+}
+
+/// `POST /sync-token?token=<space_token>&label=<optional>`
+///
+/// Requests a time-limited sync ticket for the WebSocket endpoint.
+/// Only succeeds for shared spaces — private/single-user spaces
+/// receive a `404 Not Found` since there's no team to sync with.
+pub async fn sync_token_handler(
+    State(state): State<AppState>,
+    Query(query): Query<SyncTokenQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let space = resolve_space(&state, query.token).await?;
+
+    let shared = state
+        .spaces
+        .is_shared(&space.space_id)
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to check space status: {}", e)))?;
+
+    if !shared {
+        return Err(ApiError::not_found(
+            "Space is not shared. Real-time sync is only available for shared/team spaces.",
+        ));
+    }
+
+    match state.sync_hub.issue_sync_token(&space.space_id, shared, &query.label).await {
+        Some(sync_token) => Ok(Json(serde_json::json!({
+            "sync_token": sync_token,
+            "space_id": space.space_id,
+            "expires_in_secs": 86400,
+            "ws_endpoint": format!("/ws?sync_token={}", sync_token),
+        }))),
+        None => Err(ApiError::new("Failed to issue sync token")),
+    }
+}
+
+/// Query parameters for the WebSocket endpoint.
+#[derive(Deserialize)]
+pub struct WsQuery {
+    pub sync_token: Option<String>,
+}
+
+/// `GET /ws?sync_token=<sync_token>`
+///
+/// Upgrades the connection to a WebSocket and streams `SyncEvent`
+/// JSON frames in real-time as files are added, modified, or deleted
+/// in the space.
+pub async fn ws_handler(
+    State(state): State<AppState>,
+    Query(query): Query<WsQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, ApiError> {
+    let sync_token = query
+        .sync_token
+        .ok_or_else(|| ApiError::bad_request("Missing sync_token parameter"))?;
+
+    let space_id = state
+        .sync_hub
+        .validate_sync_token(&sync_token)
+        .await
+        .ok_or_else(|| ApiError::forbidden("Invalid or expired sync token"))?;
+
+    info!("WebSocket sync connection for space={}", space_id);
+
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, space_id, state.sync_hub)))
+}
+
+/// Bridge between the raw WebSocket and the broadcast channel.
+/// Receives events from the hub and writes them to the client.
+async fn handle_socket(socket: ws::WebSocket, space_id: String, hub: Arc<SyncHub>) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let mut broadcast_rx = hub.subscribe(&space_id).await;
+    let space_id_debug = space_id.clone();
+
+    // Spawn a task that reads broadcast events and writes to WebSocket.
+    let forward_handle = tokio::spawn(async move {
+        loop {
+            match broadcast_rx.recv().await {
+                Ok(event) => {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    if ws_tx
+                        .send(ws::Message::Text(json.into()))
+                        .await
+                        .is_err()
+                    {
+                        break; // WebSocket closed.
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        "WS client lagged behind broadcast, dropped {} events",
+                        skipped
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    debug!("Broadcast channel closed for space={}", space_id_debug);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Read loop: consume any incoming client messages (ping/pong/close).
+    let read_handle = tokio::spawn(async move {
+        while let Some(msg) = ws_rx.next().await {
+            match msg {
+                Ok(m) if matches!(m, ws::Message::Close(_)) => break,
+                Err(_) => break,
+                _ => {} // Text/Binary/Ping/Pong — keep connection alive.
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = forward_handle => {},
+        _ = read_handle => {},
+    }
+
+    debug!("WebSocket client disconnected from space={}", space_id);
 }
 
 fn build_rag_context(files: &[db::FileRecord]) -> String {

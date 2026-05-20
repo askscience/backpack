@@ -11,6 +11,7 @@ A production-ready personal cloud tool that uses an external LLM to automaticall
 - **Full CRUD**: Upload, search, ask, list inventory, download, delete
 - **Iroh P2P**: Peer-to-peer connectivity via the [Iroh](https://iroh.computer) protocol — share a single ticket string to grant access. Encrypted QUIC, DHT-based discovery, no public relays, no IP in the invite
 - **Multi-user spaces**: Create fully isolated spaces per person — separate SQLite, embeddings, files, and quota. Share a space with others via share tokens. Archive and purge spaces with one-time download links.
+- **Bi-directional file sync**: Watch local directories and sync changes to/from the server. Real-time push notifications via WebSocket for shared team spaces.
 - **Docker-ready**: Multi-stage Dockerfile with Tesseract OCR, ffmpeg, and Vosk speech recognition
 
 ## Architecture
@@ -27,6 +28,26 @@ Ask   → Embed question → Retrieve top-K files → LLM answers with context
 - **LLM**: External API (OpenAI, Anthropic, Ollama, or OpenAI-compatible)
 - **P2P**: Iroh protocol — encrypted QUIC tunnels with DHT-based peer discovery, no relays
 - **Extraction**: pdf-extract, calamine (xlsx), epub, mailparse, zip+regex (docx/pptx), Tesseract (OCR), Vosk (transcription)
+- **File sync**: `notify`-based file watcher, SHA-256 change detection, WebSocket push for shared spaces
+
+## CLI Reference
+
+A single `backpack` binary with multiple subcommands:
+
+| Command | Description |
+|---------|-------------|
+| `backpack` (no args) | Start the HTTP server |
+| `backpack --iroh` | Start server with Iroh P2P |
+| `backpack sync start [dir]` | Start the file sync daemon |
+| `backpack sync init` | Initialize a directory for sync |
+| `backpack sync status --dir <dir>` | Show sync status |
+| `backpack connect <ticket>` | Iroh P2P client (proxy) |
+| `backpack space create --label X` | Create a user space |
+| `backpack space share <token>` | Share a space |
+| `backpack space list` | List all spaces |
+| `backpack space info <token>` | Show space details |
+| `backpack space delete <token>` | Delete a space |
+| `backpack help` | Show this help |
 
 ## Quick Start
 
@@ -208,6 +229,30 @@ Download a space archive (one-time link, expires after 24h).
 curl -O "http://localhost:8080/archive/dl/V1b2c3d4?token=xk9m3p"
 ```
 
+### `POST /sync-token?token=<space>`
+
+Request a time-limited WebSocket sync ticket (shared spaces only).
+
+```bash
+curl -X POST "http://localhost:8080/sync-token?token=abc123..."
+```
+
+Response:
+```json
+{
+  "sync_token": "xyz789...",
+  "space_id": "a1b2c3...",
+  "expires_in_secs": 86400,
+  "ws_endpoint": "/ws?sync_token=xyz789..."
+}
+```
+
+### `GET /ws?sync_token=<token>`
+
+WebSocket endpoint for real-time file change notifications. Used by the sync daemon for instant push sync.
+
+---
+
 ## Iroh P2P Connectivity
 
 Start the server with the `--iroh` flag to enable peer-to-peer access. The server prints a **ticket** — a single string containing only a `NodeId` (no IP, no port, no relay URL). Share this ticket to grant access.
@@ -231,7 +276,7 @@ Ticket:   nodeid:2vx6ym67hxqqy5pk3j4zt2lc6nh6fznhrngeicf52lq7tabzsrrq
    |
    v
 
-Client ($ backpack-cli nodeid:2vx6ym67...)
+Client ($ backpack connect nodeid:2vx6ym67...)
    |
    |  1. Parses the NodeId from the ticket
    |  2. Looks up the server's QUIC address via the DHT
@@ -266,16 +311,10 @@ The HTTP server still listens on `:8080` for local access. Iroh connections are 
 
 ### Client
 
-Build the client binary:
+Connect using the ticket (no separate binary needed — same `backpack` command):
 
 ```bash
-cargo build -p backpack-cli --release
-```
-
-Connect using the ticket:
-
-```bash
-backpack-cli nodeid:2vx6ym67hxqqy5pk3j4zt2lc6nh6fznhrngeicf52lq7tabzsrrq
+backpack connect nodeid:2vx6ym67hxqqy5pk3j4zt2lc6nh6fznhrngeicf52lq7tabzsrrq
 ```
 
 Output:
@@ -313,8 +352,66 @@ curl http://localhost:9090/search?q=budget
 backpack --iroh                # Iroh binds random port, auto-published to DHT
 
 # Client  
-backpack-cli --port 3000 <ticket>   # Proxy on :3000 instead of :9090
+backpack connect --port 3000 <ticket>   # Proxy on :3000 instead of :9090
 ```
+
+---
+
+## File Sync
+
+The sync daemon watches a local directory and keeps files in bi-directional sync with the backpack server. It uses SHA-256 hashing for change detection, `notify` for OS-level file watching, and WebSocket push for real-time updates in shared team spaces.
+
+### Initialize a directory
+
+```bash
+backpack sync init --dir ~/my-sync-folder \
+  --server http://localhost:8080 \
+  --space <space_token> \
+  --ignore "*.tmp" --ignore "*.swp"
+```
+
+This creates `.backpack-sync.toml` in the target directory. The space token is optional — without it, the daemon syncs to the default (owner) space.
+
+### Start syncing
+
+```bash
+cd ~/my-sync-folder
+backpack sync start
+```
+
+The daemon runs until Ctrl+C, running three concurrent loops:
+1. **Watch loop** — reacts to local file changes (create/modify/delete) in real-time
+2. **Poll loop** — periodically fetches the remote inventory (every 30s by default) and downloads new/changed files
+3. **Push loop** — if the space is shared, connects via WebSocket for instant file change notifications
+
+### Check status
+
+```bash
+backpack sync status --dir ~/my-sync-folder
+```
+
+```
+Sync Status
+===========
+  Watch dir:     /home/user/my-sync-folder
+  Server:        http://localhost:8080
+  Total tracked: 42
+  Synced:        40
+  Pending upload: 0
+  Pending dl:     1
+  Conflicted:     1
+  Errors:         0
+```
+
+### Conflict resolution
+
+If a file is modified both locally and remotely simultaneously, the local version is renamed to `filename.conflict.<ISO8601>` and the remote version is downloaded.
+
+### Shared spaces (WebSocket push)
+
+When a space has been shared with at least one other person (`backpack space share`), the sync daemon receives real-time file change notifications over WebSocket. Private single-user spaces fall back to poll-only mode — no push is needed.
+
+---
 
 ## Multi-User Spaces
 
