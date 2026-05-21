@@ -11,8 +11,9 @@ A production-ready personal cloud tool that uses an external LLM to automaticall
 - **Full CRUD**: Upload, search, ask, list inventory, download, delete
 - **Iroh P2P**: Peer-to-peer connectivity via the [Iroh](https://iroh.computer) protocol — share a single ticket string to grant access. Encrypted QUIC, DHT-based discovery, no public relays, no IP in the invite
 - **Multi-user spaces**: Create fully isolated spaces per person — separate SQLite, embeddings, files, and quota. Share a space with others via share tokens. Archive and purge spaces with one-time download links.
+- **Admin REST API**: Manage spaces remotely via HTTP endpoints (create, list, share, revoke, delete) — gated by `ADMIN_TOKEN` with constant-time Bearer auth.
 - **Bi-directional file sync**: Watch local directories and sync changes to/from the server. Real-time push notifications via WebSocket for shared team spaces.
-- **Docker-ready**: Multi-stage Dockerfile with Tesseract OCR, ffmpeg, and Vosk speech recognition
+- **Docker-ready**: Multi-stage Dockerfile with Tesseract OCR, ffmpeg, Vosk, and Iroh P2P support
 
 ## Architecture
 
@@ -37,17 +38,19 @@ A single `backpack` binary with multiple subcommands:
 | Command | Description |
 |---------|-------------|
 | `backpack` (no args) | Start the HTTP server |
-| `backpack --iroh` | Start server with Iroh P2P |
+| `backpack --features iroh --iroh` | Start server with Iroh P2P |
 | `backpack sync start [dir]` | Start the file sync daemon |
 | `backpack sync init` | Initialize a directory for sync |
 | `backpack sync status --dir <dir>` | Show sync status |
-| `backpack connect <ticket>` | Iroh P2P client (proxy) |
-| `backpack space create --label X` | Create a user space |
-| `backpack space share <token>` | Share a space |
-| `backpack space list` | List all spaces |
-| `backpack space info <token>` | Show space details |
-| `backpack space delete <token>` | Delete a space |
+| `backpack connect <ticket>` | Iroh P2P client — needs `--features iroh` |
+| `backpack space create --label X` | Create a user space (CLI) |
+| `backpack space share <token>` | Share a space (CLI) |
+| `backpack space list` | List all spaces (CLI) |
+| `backpack space info <token>` | Show space details (CLI) |
+| `backpack space delete <token>` | Delete a space (CLI) |
 | `backpack help` | Show this help |
+
+> **Note:** Iroh P2P (`--iroh`, `connect`) requires the optional `iroh` Cargo feature. Build with `cargo build --features iroh`. Without it, the server runs in plain HTTP mode and all admin/user endpoints remain functional.
 
 ## Quick Start
 
@@ -76,6 +79,8 @@ cp .env.example .env
 
 ```bash
 cargo run --release
+# With Iroh P2P:
+cargo run --release --features iroh
 ```
 
 The server starts on `http://0.0.0.0:8080`.
@@ -86,7 +91,7 @@ The server starts on `http://0.0.0.0:8080`.
 docker compose up -d
 ```
 
-Docker includes Tesseract OCR, ffmpeg, and Vosk for full text extraction.
+Docker includes Tesseract OCR, ffmpeg, Vosk, and Iroh P2P support.
 
 ## Environment Variables
 
