@@ -1,25 +1,33 @@
+mod admin;
+mod admin_routes;
 mod catalog;
 mod config;
 mod db;
 mod extraction;
 mod handlers;
+#[cfg(feature = "iroh")]
 mod iroh;
 mod spaces;
 mod sync;
 mod sync_hub;
 mod vector;
 
+#[cfg(feature = "iroh")]
 use std::net::SocketAddr;
+#[cfg(feature = "iroh")]
 use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{routing, Router};
 use clap::{Parser, Subcommand};
+#[cfg(feature = "iroh")]
 use iroh_net::{key::SecretKey, ticket::NodeTicket, Endpoint, NodeAddr};
 use reqwest::Client;
 use sqlx::SqlitePool;
+#[cfg(feature = "iroh")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "iroh")]
 use tokio::net::TcpStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -31,12 +39,14 @@ use crate::handlers::AppState;
 use crate::spaces::{DeleteMode, SpaceManager};
 use crate::sync::{SyncClient, SyncConfig, SyncEngine, SyncState};
 
+#[cfg(feature = "iroh")]
 const ALPN: &[u8] = b"backpack-http/1";
 
 #[derive(Parser)]
 #[command(name = "backpack", version, about = "AI Cloud Backpack — personal file catalog with LLM")]
 struct Cli {
     /// Enable Iroh P2P connectivity (server mode only)
+    #[cfg(feature = "iroh")]
     #[arg(long, global = true)]
     iroh: bool,
 
@@ -52,6 +62,7 @@ enum Commands {
         action: SyncAction,
     },
     /// Connect via Iroh P2P tunnel (client mode)
+    #[cfg(feature = "iroh")]
     Connect {
         /// Iroh ticket from `backpack --iroh`
         ticket: String,
@@ -145,6 +156,7 @@ async fn main() {
         Some(Commands::Sync { action }) => {
             handle_sync(action).await;
         }
+        #[cfg(feature = "iroh")]
         Some(Commands::Connect { ticket, port }) => {
             if let Err(e) = run_p2p_client(&ticket, port).await {
                 error!("P2P client error: {}", e);
@@ -156,7 +168,11 @@ async fn main() {
         }
         None => {
             // Default: server mode
-            run_server(config, cli.iroh).await;
+            #[cfg(feature = "iroh")]
+            let iroh = cli.iroh;
+            #[cfg(not(feature = "iroh"))]
+            let iroh = false;
+            run_server(config, iroh).await;
         }
     }
 }
@@ -354,6 +370,7 @@ async fn handle_space(action: SpaceAction, config: &config::Config) {
 
 // ── P2P client ───────────────────────────────────────────────────────
 
+#[cfg(feature = "iroh")]
 async fn run_p2p_client(ticket_str: &str, port: u16) -> anyhow::Result<()> {
     let ticket = NodeTicket::from_str(ticket_str)
         .context("Failed to parse ticket. Ensure you copied the full ticket string.")?;
@@ -400,6 +417,7 @@ async fn run_p2p_client(ticket_str: &str, port: u16) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(feature = "iroh")]
 async fn proxy_request(
     conn: Arc<iroh_net::endpoint::Connection>,
     tcp: TcpStream,
@@ -485,6 +503,30 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
     let max_bytes = config.max_file_size_mb * 1024 * 1024;
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
 
+    // ── Admin API router (gated by ADMIN_TOKEN) ──────────────────────
+    // The middleware returns 404 for every request when ADMIN_TOKEN is
+    // not configured OR when the Authorization: Bearer header does not
+    // match. Constant-time comparison prevents timing attacks.
+    let admin_state = state.clone();
+    let admin_token_for_auth = state.config.admin_token.clone();
+    let admin_routes = Router::new()
+        .route("/spaces", routing::post(admin_routes::create_space)
+            .get(admin_routes::list_spaces))
+        .route("/spaces/:id", routing::get(admin_routes::space_info)
+            .delete(admin_routes::delete_space))
+        .route("/spaces/:id/share", routing::post(admin_routes::share_space))
+        .route("/spaces/:id/shares/:share_token/revoke", routing::post(admin_routes::revoke_share_admin))
+        .route_layer(axum::middleware::from_fn(move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+            let token = admin_token_for_auth.clone();
+            async move {
+                match crate::admin::check_admin_auth(&token, req.headers()) {
+                    Ok(()) => next.run(req).await,
+                    Err(response) => response,
+                }
+            }
+        }))
+        .with_state(admin_state);
+
     let app = Router::new()
         .route("/upload", routing::post(handlers::upload_handler))
         .route("/search", routing::get(handlers::search_handler))
@@ -511,6 +553,7 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
                 }
             }))
         }))
+        .nest("/api/admin", admin_routes)
         .layer(RequestBodyLimitLayer::new(max_bytes as usize))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -519,26 +562,38 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     info!("HTTP listening on {}", addr);
 
-    if iroh_enabled {
-        let iroh_server = iroh::IrohServer::new().await.expect("Failed to start Iroh");
-        let axum_port: u16 = addr
-            .split(':').last().and_then(|p| p.parse().ok())
-            .unwrap_or(8080);
+    #[cfg(feature = "iroh")]
+    {
+        if iroh_enabled {
+            let iroh_server = iroh::IrohServer::new().await.expect("Failed to start Iroh");
+            let axum_port: u16 = addr
+                .split(':').last().and_then(|p| p.parse().ok())
+                .unwrap_or(8080);
 
-        info!("NodeId:  {}", iroh_server.node_id());
-        info!("Ticket:  {}", iroh_server.ticket());
-        info!(" \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} Share this ticket for P2P access \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+            info!("NodeId:  {}", iroh_server.node_id());
+            info!("Ticket:  {}", iroh_server.ticket());
+            info!(" \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} Share this ticket for P2P access \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
 
-        let bridge = iroh_server.bridge_loop(axum_port);
+            let bridge = iroh_server.bridge_loop(axum_port);
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .expect("Failed to bind HTTP address");
+
+            tokio::select! {
+                _ = axum::serve(listener, app) => {},
+                _ = bridge => {},
+            }
+            return;
+        }
+
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .expect("Failed to bind HTTP address");
+        axum::serve(listener, app).await.expect("Server error");
+    }
 
-        tokio::select! {
-            _ = axum::serve(listener, app) => {},
-            _ = bridge => {},
-        }
-    } else {
+    #[cfg(not(feature = "iroh"))]
+    {
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .expect("Failed to bind HTTP address");

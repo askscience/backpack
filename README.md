@@ -106,6 +106,7 @@ Docker includes Tesseract OCR, ffmpeg, and Vosk for full text extraction.
 | `SKILL_PATH` | `./skill.md` | Path to the cataloging prompt file |
 | `VOSK_MODEL_PATH` | `/opt/vosk-model` | Path to Vosk speech model |
 | `BIND_ADDR` | `0.0.0.0:8080` | Server bind address |
+| `ADMIN_TOKEN` | _disabled_ | Bearer token for admin API endpoints. When unset, `/api/admin/*` returns 404. Generate with `openssl rand -hex 32`. |
 
 ## API Endpoints
 
@@ -551,6 +552,110 @@ Set at creation time with `--quota <mb>`. 0 = unlimited. If a file exceeds the r
 | 403 Forbidden | Invalid space token |
 | 413 Content Too Large | Quota exceeded |
 | 404 Not Found | File or space not found |
+
+## Admin API
+
+Admin endpoints manage all spaces on the server. They require an `ADMIN_TOKEN` environment variable (set it on the server). When `ADMIN_TOKEN` is not configured, all admin routes return `404` — the endpoints are invisible.
+
+All admin requests include the token as an `Authorization: Bearer` header. Invalid or missing tokens also return `404` (never `401` or `403`) to avoid confirming the endpoints exist.
+
+```bash
+# Generate a token (run on the server):
+openssl rand -hex 32
+# → e8a1f3b9c40d7e6a2f5c8b1d3e9a7f4c6d2b5a8e1f3c9d7b6a2e5c8f1d4e7
+
+# Export on the server:
+export ADMIN_TOKEN=e8a1f3b9c40d7e6a2f5c8b1d3e9a7f4c6d2b5a8e1f3c9d7b6a2e5c8f1d4e7
+```
+
+### `POST /api/admin/spaces`
+
+Create a new space.
+
+```bash
+curl -X POST http://localhost:8080/api/admin/spaces \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "bob-project", "quota_mb": 500}'
+```
+
+Response:
+```json
+{
+  "space_id": "a1b2c3d4...",
+  "label": "bob-project",
+  "owner_token": "e5f6g7h8i9j0...",
+  "quota_mb": 500,
+  "upload_dir": "./spaces/a1b2c3d4/uploads"
+}
+```
+
+### `GET /api/admin/spaces`
+
+List all spaces.
+
+```bash
+curl http://localhost:8080/api/admin/spaces \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+Response:
+```json
+[
+  {
+    "id": "a1b2c3d4...",
+    "label": "bob-project",
+    "owner_token": "e5f6g7h8...",
+    "quota_mb": 500,
+    "used_mb": 154.2,
+    "shares": 1,
+    "status": "active"
+  }
+]
+```
+
+### `GET /api/admin/spaces/:id`
+
+Get full details for one space.
+
+```bash
+curl http://localhost:8080/api/admin/spaces/a1b2c3d4... \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+### `DELETE /api/admin/spaces/:id?mode=purge|archive&for_share=...`
+
+Delete a space.
+
+```bash
+# Permanent deletion:
+curl -X DELETE "http://localhost:8080/api/admin/spaces/a1b2c3d4...?mode=purge" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Archive before deletion (24h download window):
+curl -X DELETE "http://localhost:8080/api/admin/spaces/a1b2c3d4...?mode=archive&for_share=xk9m3p" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+### `POST /api/admin/spaces/:id/share`
+
+Create a share token for a space.
+
+```bash
+curl -X POST http://localhost:8080/api/admin/spaces/a1b2c3d4.../share \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "bob"}'
+```
+
+### `POST /api/admin/spaces/:id/shares/:share_token/revoke`
+
+Revoke a share token and disconnect any WebSocket sync clients.
+
+```bash
+curl -X POST http://localhost:8080/api/admin/spaces/a1b2c3d4.../shares/xk9m3p.../revoke \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
 
 ## Provider-Specific Setup
 

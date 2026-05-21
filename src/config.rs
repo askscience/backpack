@@ -15,6 +15,9 @@ pub struct Config {
     pub skill_path: String,
     #[allow(dead_code)]
     pub vosk_model_path: String,
+    /// Bearer token for admin API endpoints (spaces CRUD). When `None`,
+    /// all `/api/admin/*` routes return 404, revealing no information.
+    pub admin_token: Option<String>,
 }
 
 impl Config {
@@ -46,6 +49,12 @@ impl Config {
             .parse()
             .unwrap_or(1536);
 
+        // Admin token: when set, enables /api/admin/* endpoints.
+        // When absent (default), admin routes return 404 for every request.
+        let admin_token = env::var("ADMIN_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+
         Ok(Config {
             llm_provider,
             llm_api_key,
@@ -61,6 +70,7 @@ impl Config {
             db_path: env::var("DB_PATH").unwrap_or_else(|_| "./data/backpack.db".into()),
             skill_path: env::var("SKILL_PATH").unwrap_or_else(|_| "./skill.md".into()),
             vosk_model_path: env::var("VOSK_MODEL_PATH").unwrap_or_else(|_| "/opt/vosk-model".into()),
+            admin_token,
         })
     }
 }

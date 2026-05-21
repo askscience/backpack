@@ -3,6 +3,10 @@ name = "backpack"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+iroh = ["iroh-net"]
+
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
 axum-extra = { version = "0.9", features = ["multipart"] }
@@ -28,7 +32,7 @@ mailparse = "0.15"
 zip = "0.6"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
-iroh-net = { version = "0.28", features = ["discovery-pkarr-dht"] }
+iroh-net = { version = "0.28", features = ["discovery-pkarr-dht"], optional = true }
 notify = "6"
 sha2 = "0.10"
 hex = "0.4"

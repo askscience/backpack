@@ -77,7 +77,7 @@ pub struct ArchiveInfo {
     pub downloaded: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct DeleteResult {
     pub purged: bool,
     pub archive_path: Option<String>,
@@ -619,6 +619,21 @@ impl SpaceManager {
             .execute(&self.registry)
             .await?;
         Ok(())
+    }
+
+    /// Look up the owner_token for a space by its UUID.
+    /// Used by the admin API so it can delegate to existing
+    /// token-based methods (`info`, `share`, `delete`).
+    pub async fn find_owner_token(&self, space_id: &str) -> Result<String> {
+        let row = sqlx::query(
+            "SELECT owner_token FROM spaces WHERE id = ?1 AND status != 'deleted'",
+        )
+        .bind(space_id)
+        .fetch_optional(&self.registry)
+        .await?;
+
+        row.map(|r| r.get::<String, _>("owner_token"))
+            .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space_id))
     }
 
     #[allow(dead_code)]
