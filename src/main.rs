@@ -523,7 +523,13 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
     };
 
     let max_bytes = config.max_file_size_mb * 1024 * 1024;
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ]);
 
     // ── Admin API router (gated by ADMIN_TOKEN) ──────────────────────
     // The middleware returns 404 for every request when ADMIN_TOKEN is
@@ -531,6 +537,7 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
     // match. Constant-time comparison prevents timing attacks.
     let admin_state = state.clone();
     let admin_token_for_auth = state.config.admin_token.clone();
+    let admin_pool = state.pool.clone();
     let admin_routes = Router::new()
         .route("/spaces", routing::post(admin_routes::create_space)
             .get(admin_routes::list_spaces))
@@ -546,8 +553,9 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .route("/archives", routing::get(admin_routes::list_archives))
         .route_layer(axum::middleware::from_fn(move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
             let token = admin_token_for_auth.clone();
+            let pool = admin_pool.clone();
             async move {
-                match crate::admin::check_admin_auth(&token, req.headers()) {
+                match crate::admin::verify_admin_access(&pool, &token, req.headers()).await {
                     Ok(()) => next.run(req).await,
                     Err(response) => response,
                 }

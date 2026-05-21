@@ -43,6 +43,40 @@ pub fn check_admin_auth(
     }
 }
 
+/// Verifies admin access via raw admin token OR WebAuthn admin session.
+///
+/// First tries the configured `ADMIN_TOKEN`. If that fails, checks
+/// whether the Bearer token is a valid WebAuthn session with admin
+/// role. This allows admins who registered via passkey to use the
+/// admin panel without knowing the raw token.
+pub async fn verify_admin_access(
+    pool: &sqlx::SqlitePool,
+    configured_token: &Option<String>,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), axum::response::Response<axum::body::Body>> {
+    // First: try the raw admin token.
+    if check_admin_auth(configured_token, headers).is_ok() {
+        return Ok(());
+    }
+
+    // Second: try WebAuthn admin session.
+    if let Some(session_token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        if let Ok(Some((_user_id, role))) =
+            crate::webauthn::resolve_session(pool, session_token).await
+        {
+            if role == "admin" {
+                return Ok(());
+            }
+        }
+    }
+
+    Err(not_found_response())
+}
+
 /// Builds a generic 404 response with no body.
 /// Deliberately returns 404 (not 401 or 403) to avoid confirming
 /// that admin endpoints exist on this server.
