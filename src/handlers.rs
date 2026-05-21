@@ -20,6 +20,7 @@ use crate::db::{self, FileRecord, f32_vec_to_bytes};
 use crate::spaces::{SpaceHandle, SpaceManager};
 use crate::sync_hub::{SyncHub, SyncEvent};
 use crate::vector;
+use crate::webauthn::{self, WebauthnApp};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -29,6 +30,7 @@ pub struct AppState {
     pub client: Client,
     pub spaces: Arc<SpaceManager>,
     pub sync_hub: Arc<SyncHub>,
+    pub webauthn: Arc<WebauthnApp>,
 }
 
 #[derive(Debug, Serialize)]
@@ -870,4 +872,190 @@ pub async fn archive_download_handler(
     let _ = state.spaces.mark_archive_downloaded(&download_token).await;
 
     Ok((headers, data))
+}
+
+// ── WebAuthn ─────────────────────────────────────────────────────
+
+pub async fn webauthn_register_start(
+    State(state): State<AppState>,
+    Json(body): Json<webauthn::WebauthnRegisterStartRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_from_token(&state, &body.token).await?;
+    let (ccr, challenge_id) = state
+        .webauthn
+        .start_registration(&user_id, &user_id)
+        .map_err(|e| ApiError::new(format!("Registration failed: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "challenge_id": challenge_id,
+        "public_key": ccr,
+    })))
+}
+
+pub async fn webauthn_register_finish(
+    State(state): State<AppState>,
+    Json(body): Json<webauthn::WebauthnRegisterFinishRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = {
+        state.webauthn.challenges.lock().unwrap()
+            .get(&body.challenge_id)
+            .map(|(_, uid)| uid.clone())
+            .ok_or_else(|| ApiError::bad_request("Session lost — please try again"))?
+    };
+
+    let passkey = state
+        .webauthn
+        .finish_registration(&body.challenge_id, &body.credential)
+        .map_err(|e| ApiError::bad_request(format!("Registration failed: {}", e)))?;
+
+    let pool = &state.pool;
+    webauthn::store_passkey(pool, &user_id, &passkey)
+        .await
+        .map_err(|e| ApiError::new(format!("Storage failed: {}", e)))?;
+
+    let role = if user_id == "admin" { "admin" } else { "user" };
+    let session = webauthn::create_session(pool, &user_id, role)
+        .await
+        .map_err(|e| ApiError::new(format!("Session failed: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "session_token": session,
+        "user_id": user_id,
+        "role": role,
+    })))
+}
+
+pub async fn webauthn_auth_start(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (rcr, challenge_id) = state
+        .webauthn
+        .start_authentication()
+        .map_err(|e| ApiError::new(format!("Auth failed: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "challenge_id": challenge_id,
+        "public_key": rcr,
+    })))
+}
+
+pub async fn webauthn_auth_finish(
+    State(state): State<AppState>,
+    Json(body): Json<webauthn::WebauthnAuthFinishRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let result = state
+        .webauthn
+        .finish_authentication(&body.challenge_id, &body.credential)
+        .map_err(|e| ApiError::forbidden(format!("Auth failed: {}", e)))?;
+
+    let pool = &state.pool;
+    let user_id = webauthn::find_user_by_credential(pool, result.cred_id())
+        .await
+        .map_err(|e| ApiError::new(format!("Lookup failed: {}", e)))?
+        .ok_or_else(|| ApiError::forbidden("Unknown credential"))?;
+
+    let role = if user_id == "admin" { "admin" } else { "user" };
+    let session = webauthn::create_session(pool, &user_id, role)
+        .await
+        .map_err(|e| ApiError::new(format!("Session failed: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "session_token": session,
+        "user_id": user_id,
+        "role": role,
+    })))
+}
+
+pub async fn webauthn_whoami(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_token = params.get("session_token").cloned().unwrap_or_default();
+    if session_token.is_empty() {
+        return Err(ApiError::forbidden("No session"));
+    }
+
+    let session = webauthn::resolve_session(&state.pool, &session_token)
+        .await
+        .map_err(|_| ApiError::forbidden("Invalid session"))?
+        .ok_or_else(|| ApiError::forbidden("Session expired"))?;
+
+    Ok(Json(serde_json::json!({
+        "user_id": session.0,
+        "role": session.1,
+    })))
+}
+
+async fn resolve_user_from_token(state: &AppState, token: &str) -> Result<String, ApiError> {
+    if let Some(admin_token) = &state.config.admin_token {
+        if token == admin_token.as_str() {
+            return Ok("admin".to_string());
+        }
+    }
+
+    let handle = state
+        .spaces
+        .resolve(Some(token))
+        .await
+        .map_err(|_| ApiError::forbidden("Invalid token"))?;
+
+    Ok(handle.space_id)
+}
+
+// ── Share management ──────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CreateShareRequest {
+    pub label: String,
+}
+
+pub async fn create_space_share(
+    State(state): State<AppState>,
+    Query(params): Query<TokenQuery>,
+    Json(body): Json<CreateShareRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = params.token.as_deref().unwrap_or("");
+    let share = state
+        .spaces
+        .share(token, &body.label)
+        .await
+        .map_err(|e| ApiError::forbidden(format!("Share failed: {}", e)))?;
+
+    Ok(Json(serde_json::to_value(&share).unwrap_or_default()))
+}
+
+pub async fn list_space_shares(
+    State(state): State<AppState>,
+    Query(params): Query<TokenQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = params.token.as_deref().unwrap_or("");
+    let shares = state
+        .spaces
+        .list_shares_for_owner(token)
+        .await
+        .map_err(|e| ApiError::forbidden(format!("{}", e)))?;
+
+    Ok(Json(serde_json::to_value(&shares).unwrap_or_default()))
+}
+
+pub async fn revoke_all_space_shares(
+    State(state): State<AppState>,
+    Query(params): Query<TokenQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = params.token.as_deref().unwrap_or("");
+    let count = state
+        .spaces
+        .revoke_all_shares(token)
+        .await
+        .map_err(|e| ApiError::forbidden(format!("{}", e)))?;
+
+    if let Ok(space_id) = state.spaces.find_owner_token(token).await {
+        state.sync_hub.broadcast_revoked(&space_id).await;
+        state.sync_hub.revoke_space_tokens(&space_id).await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "revoked": true,
+        "count": count,
+    })))
 }

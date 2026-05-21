@@ -18,6 +18,10 @@ pub struct Config {
     /// Bearer token for admin API endpoints (spaces CRUD). When `None`,
     /// all `/api/admin/*` routes return 404, revealing no information.
     pub admin_token: Option<String>,
+    /// WebAuthn RP ID (e.g. "localhost" or "backpack.example.com")
+    pub webauthn_rp_id: String,
+    /// WebAuthn RP origin (e.g. "http://localhost:8080")
+    pub webauthn_origin: String,
 }
 
 impl Config {
@@ -77,6 +81,8 @@ impl Config {
             skill_path: env::var("SKILL_PATH").unwrap_or_else(|_| "./skill.md".into()),
             vosk_model_path: env::var("VOSK_MODEL_PATH").unwrap_or_else(|_| "/opt/vosk-model".into()),
             admin_token,
+            webauthn_rp_id: env::var("WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into()),
+            webauthn_origin: env::var("WEBAUTHN_ORIGIN").unwrap_or_else(|_| "http://localhost:8080".into()),
         })
     }
 }

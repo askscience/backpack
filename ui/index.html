@@ -16,31 +16,34 @@
     </div>
     <div class="login-form-wrap">
       <div class="login-form-title">Access</div>
-      <div class="login-form-subtitle">Enter a space token or admin token.</div>
+      <div class="login-form-subtitle">Sign in or register a device.</div>
 
-      <template x-if="!showAdmin">
+      <!-- WebAuthn available -->
+      <template x-if="webauthnAvailable">
         <div>
+          <button class="btn btn-primary btn-full mb-16" @click="doWebauthnAuth" x-text="authenticating ? 'Authenticating…' : 'Sign in with WebAuthn'"></button>
+          <div class="login-divider">or register new device</div>
           <div class="col-gap-16">
-            <input type="text" class="input input-line" x-model="spaceToken" placeholder="Space token" @keyup.enter="connectSpace">
-            <button class="btn btn-primary btn-full" @click="connectSpace" x-text="connecting ? 'Connecting…' : 'Enter Space'"></button>
+            <input type="text" class="input input-line" x-model="registerToken" placeholder="Enter token to register this device" @keyup.enter="doRegister">
+            <button class="btn btn-outline btn-full" @click="doRegister" x-text="registering ? 'Registering…' : 'Register this device'"></button>
           </div>
-          <div class="login-divider">or</div>
-          <button class="btn btn-outline btn-full" @click="showAdmin = true">Admin access</button>
         </div>
       </template>
 
-      <template x-if="showAdmin">
+      <!-- No WebAuthn -->
+      <template x-if="!webauthnAvailable">
         <div>
           <div class="col-gap-16">
-            <input type="password" class="input input-line" x-model="adminToken" placeholder="Admin token" @keyup.enter="connectAdmin">
-            <button class="btn btn-primary btn-full" @click="connectAdmin" x-text="connecting ? 'Connecting…' : 'Enter Admin'"></button>
+            <input type="text" class="input input-line" x-model="spaceToken" placeholder="Space token" @keyup.enter="connectWithToken">
+            <button class="btn btn-primary btn-full" @click="connectWithToken" x-text="connecting ? 'Connecting…' : 'Enter Space'"></button>
           </div>
           <div class="login-divider">or</div>
-          <button class="btn btn-outline btn-full" @click="showAdmin = false">Space token</button>
+          <input type="password" class="input input-line" x-model="adminToken" placeholder="Admin token" @keyup.enter="connectAdmin">
+          <button class="btn btn-outline btn-full mt-16" @click="connectAdmin" x-text="connecting ? 'Connecting…' : 'Enter Admin'"></button>
         </div>
       </template>
 
-      <div class="login-server-box">
+      <div class="mt-32">
         <input type="text" class="input input-line" x-model="apiBaseUrl" placeholder="Server URL (default: http://localhost:8080)" style="font-size:0.8125rem">
       </div>
       <div class="login-err" x-show="error" x-text="error"></div>
@@ -49,19 +52,61 @@
 
   <script src="js/api.js"></script>
   <script src="js/utils.js"></script>
+  <script src="js/webauthn.js"></script>
   <script src="js/components.js"></script>
   <script>
     function loginApp() {
       return {
-        spaceToken: '', adminToken: '',
+        spaceToken: '', adminToken: '', registerToken: '',
         apiBaseUrl: localStorage.getItem('api_base_url') || 'http://localhost:8080',
-        showAdmin: false, connecting: false, error: '',
+        connecting: false, authenticating: false, registering: false, error: '',
+        webauthnAvailable: false,
+
         init() {
           initTheme();
+          this.webauthnAvailable = !!window.PublicKeyCredential;
           if (getToken()) { window.location.href = 'dashboard.html'; return; }
           if (getAdminToken()) { window.location.href = 'admin.html'; return; }
         },
-        async connectSpace() {
+
+        async doWebauthnAuth() {
+          this.authenticating = true; this.error = '';
+          setApiBaseUrl(this.apiBaseUrl);
+          try {
+            const result = await webauthnAuthenticate();
+            if (result.role === 'admin') {
+              setAdminToken(result.session_token);
+              window.location.href = 'admin.html';
+            } else {
+              setToken(result.session_token);
+              window.location.href = 'dashboard.html';
+            }
+          } catch (e) {
+            this.error = e.message || 'WebAuthn authentication failed';
+          }
+          this.authenticating = false;
+        },
+
+        async doRegister() {
+          if (!this.registerToken.trim()) return;
+          this.registering = true; this.error = '';
+          setApiBaseUrl(this.apiBaseUrl);
+          try {
+            const result = await webauthnRegister(this.registerToken.trim());
+            if (result.role === 'admin') {
+              setAdminToken(result.session_token);
+              window.location.href = 'admin.html';
+            } else {
+              setToken(result.session_token);
+              window.location.href = 'dashboard.html';
+            }
+          } catch (e) {
+            this.error = e.message || 'Registration failed';
+          }
+          this.registering = false;
+        },
+
+        async connectWithToken() {
           if (!this.spaceToken.trim()) return;
           this.connecting = true; this.error = '';
           setApiBaseUrl(this.apiBaseUrl);
@@ -69,16 +114,17 @@
           try { await getInventory(); window.location.href = 'dashboard.html'; return; } catch (_) {}
           setAdminToken(this.spaceToken.trim());
           try { await getAdminSpaces(); window.location.href = 'admin.html'; return; } catch (_) {}
-          this.error = 'Invalid token — not a space token nor an admin token';
+          this.error = 'Invalid token';
           clearTokens(); this.connecting = false;
         },
+
         async connectAdmin() {
           if (!this.adminToken.trim()) return;
           this.connecting = true; this.error = '';
           setApiBaseUrl(this.apiBaseUrl);
           setAdminToken(this.adminToken.trim());
           try { await getAdminSpaces(); window.location.href = 'admin.html'; }
-          catch (e) { this.error = e.message || 'Failed to authenticate'; clearTokens(); this.connecting = false; }
+          catch (e) { this.error = e.message || 'Failed'; clearTokens(); this.connecting = false; }
         }
       };
     }

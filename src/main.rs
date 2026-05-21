@@ -11,6 +11,7 @@ mod spaces;
 mod sync;
 mod sync_hub;
 mod vector;
+mod webauthn;
 
 #[cfg(feature = "iroh")]
 use std::net::SocketAddr;
@@ -489,6 +490,22 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .expect("Failed to initialize space manager");
     info!("Space manager initialized");
 
+    let webauthn_app = webauthn::WebauthnApp::new(
+        &config.webauthn_rp_id,
+        &config.webauthn_origin,
+    )
+    .expect("Failed to init WebAuthn");
+    webauthn::ensure_webauthn_schema(&default_pool)
+        .await
+        .expect("Failed to init WebAuthn schema");
+
+    if let Some(ref token) = config.admin_token {
+        info!("Admin token: {}", token);
+        info!("Use this token in the UI to register for admin access.");
+        let _ = std::fs::create_dir_all("data");
+        let _ = std::fs::write("data/admin-token.txt", format!("{}\n", token));
+    }
+
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -502,6 +519,7 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         client,
         spaces: Arc::new(space_manager),
         sync_hub,
+        webauthn: Arc::new(webauthn_app),
     };
 
     let max_bytes = config.max_file_size_mb * 1024 * 1024;
@@ -548,6 +566,14 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .route("/sync-token", routing::post(handlers::sync_token_handler))
         .route("/ws", routing::get(handlers::ws_handler))
         .route("/space/revoke-share", routing::post(handlers::revoke_share_handler))
+        .route("/space/shares", routing::get(handlers::list_space_shares)
+            .post(handlers::create_space_share))
+        .route("/space/shares/revoke-all", routing::post(handlers::revoke_all_space_shares))
+        .route("/api/webauthn/register/start", routing::post(handlers::webauthn_register_start))
+        .route("/api/webauthn/register/finish", routing::post(handlers::webauthn_register_finish))
+        .route("/api/webauthn/auth/start", routing::post(handlers::webauthn_auth_start))
+        .route("/api/webauthn/auth/finish", routing::post(handlers::webauthn_auth_finish))
+        .route("/api/webauthn/whoami", routing::get(handlers::webauthn_whoami))
         .route("/", routing::get(|| async {
             axum::Json(serde_json::json!({
                 "name": "AI Cloud Backpack",

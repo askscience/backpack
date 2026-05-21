@@ -46,6 +46,7 @@ function renderNav(currentPage) {
       { id: 'files', label: 'Files', href: 'files.html' },
       { id: 'search', label: 'Search', href: 'search.html' },
       { id: 'ask', label: 'Ask', href: 'ask.html' },
+      { id: 'shares', label: 'Shares', href: 'shares.html' },
     ];
     for (const p of spacePages) {
       const active = p.id === currentPage;

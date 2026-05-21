@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack — Shares</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="sharesApp()" x-init="init()">
+  <div id="main-nav"></div>
+
+  <div class="page">
+    <div class="page-header">
+      <div class="page-header-group">
+        <div class="page-title">Shares</div>
+        <div class="page-sub">Manage who has access to your space.</div>
+      </div>
+      <button class="btn btn-primary" @click="showCreate = true">Create Share</button>
+    </div>
+
+    <!-- Create share form -->
+    <div x-show="showCreate" class="section" x-transition>
+      <div class="modal-input-gap" style="max-width: 480px;">
+        <input type="text" class="input" x-model="createLabel" placeholder="Label (e.g. Read-only for Alice)" @keyup.enter="doCreate">
+        <div class="flex-center" style="gap:8px">
+          <button class="btn btn-primary btn-sm" @click="doCreate" x-text="creating ? 'Creating…' : 'Create Share'"></button>
+          <button class="btn btn-ghost btn-sm" @click="showCreate = false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="loading-state"></div>
+
+    <div class="section" x-show="!loading">
+      <div class="section-head" x-show="shares.length > 0">
+        <div class="section-title" x-text="`${shares.length} active share${shares.length !== 1 ? 's' : ''}`"></div>
+        <button class="btn btn-danger btn-sm" @click="confirmRevokeAll" x-show="shares.length > 0">Revoke all</button>
+      </div>
+      <div class="table-wrap" x-show="shares.length > 0">
+        <table>
+          <thead><tr><th>Share Token</th><th>Label</th><th>Created</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="sh in shares" :key="sh.share_token">
+              <tr>
+                <td class="mono-cell" x-text="sh.share_token"></td>
+                <td x-text="sh.label"></td>
+                <td class="caption" x-text="sh.created_at ? formatDate(sh.created_at) : '—'"></td>
+                <td><button class="table-btn danger" @click="revokeOne(sh.share_token)">Revoke</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div class="empty-state" x-show="shares.length === 0"><p>No active shares. Create one to invite someone.</p></div>
+    </div>
+  </div>
+
+  <!-- Revoke all confirmation -->
+  <template x-if="revokeAllTarget">
+    <div class="modal-overlay" @click="revokeAllTarget = false">
+      <div class="modal" @click.stop>
+        <div class="modal-title">Revoke all shares?</div>
+        <p class="modal-text" x-text="`This will revoke ${shares.length} share${shares.length !== 1 ? 's' : ''} immediately. All shared users will lose access.`"></p>
+        <div class="modal-actions">
+          <button class="btn btn-outline btn-full" @click="revokeAllTarget = false">Cancel</button>
+          <button class="btn btn-danger btn-full" @click="doRevokeAll" x-text="revoking ? 'Revoking…' : 'Revoke all'"></button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <template x-if="newShare">
+    <div class="modal-overlay" @click="newShare = null">
+      <div class="modal" @click.stop>
+        <div class="modal-title">Share Token Created</div>
+        <p class="modal-text">Share this token with the person you want to give access to:</p>
+        <div class="mono" style="font-size:0.8125rem; word-break:break-all; padding: 12px; background: var(--bg-2); margin-bottom: 20px;" x-text="newShare"></div>
+        <button class="btn btn-outline btn-full" @click="newShare = null">Close</button>
+      </div>
+    </div>
+  </template>
+
+  <script src="js/api.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/webauthn.js"></script>
+  <script src="js/components.js"></script>
+  <script>
+    function sharesApp() {
+      return {
+        shares: [], loading: true,
+        showCreate: false, createLabel: '', creating: false,
+        revokeAllTarget: false, revoking: false, newShare: null,
+
+        async init() {
+          initTheme(); renderNav('shares');
+          const token = getToken();
+          if (!token) { window.location.href = 'index.html'; return; }
+          await this.load();
+        },
+
+        async load() {
+          this.loading = true;
+          try {
+            const token = getToken();
+            this.shares = await getSpaceShares(token);
+          } catch (e) { showError('loading-state', e.message); }
+          finally { this.loading = false; }
+        },
+
+        async doCreate() {
+          if (!this.createLabel.trim()) return;
+          this.creating = true;
+          try {
+            const token = getToken();
+            await fetch(`${API_BASE_URL}/space/shares?token=${encodeURIComponent(token)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ label: this.createLabel.trim() }),
+            });
+            toast('Share created');
+            this.showCreate = false; this.createLabel = '';
+            await this.load();
+          } catch (e) { toast(e.message, true); }
+          this.creating = false;
+        },
+
+        revokeOne(token) {
+          revokeUserShare(getToken(), token).then(() => {
+            toast('Share revoked'); this.load();
+          }).catch(e => toast(e.message, true));
+        },
+
+        confirmRevokeAll() { this.revokeAllTarget = true; },
+        async doRevokeAll() {
+          this.revoking = true;
+          try {
+            await revokeAllSpaceShares(getToken());
+            toast('All shares revoked');
+            this.revokeAllTarget = false;
+            await this.load();
+          } catch (e) { toast(e.message, true); }
+          this.revoking = false;
+        }
+      };
+    }
+
+    async function revokeUserShare(ownerToken, shareToken) {
+      const res = await fetch(`${API_BASE_URL}/space/revoke-share`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ owner_token: ownerToken, share_token: shareToken }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+  </script>
+</body>
+</html>

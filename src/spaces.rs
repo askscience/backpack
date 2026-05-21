@@ -794,6 +794,53 @@ impl SpaceManager {
         Ok(())
     }
 
+    pub async fn list_shares_for_owner(&self, owner_token: &str) -> Result<Vec<ShareInfo>> {
+        let space_id: String = sqlx::query(
+            "SELECT id FROM spaces WHERE owner_token = ?1 AND status = 'active'",
+        )
+        .bind(owner_token)
+        .fetch_optional(&self.registry)
+        .await?
+        .map(|r| r.get("id"))
+        .ok_or_else(|| anyhow::anyhow!("Space not found or not active"))?;
+
+        let rows = sqlx::query(
+            "SELECT share_token, label, can_write FROM share_tokens WHERE space_id = ?1 ORDER BY created_at DESC",
+        )
+        .bind(&space_id)
+        .fetch_all(&self.registry)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| ShareInfo {
+                share_token: r.get("share_token"),
+                label: r.get("label"),
+                can_write: r.get::<i64, _>("can_write") != 0,
+            })
+            .collect())
+    }
+
+    pub async fn revoke_all_shares(&self, owner_token: &str) -> Result<usize> {
+        let space_id: String = sqlx::query(
+            "SELECT id FROM spaces WHERE owner_token = ?1 AND status = 'active'",
+        )
+        .bind(owner_token)
+        .fetch_optional(&self.registry)
+        .await?
+        .map(|r| r.get("id"))
+        .ok_or_else(|| anyhow::anyhow!("Space not found or not active"))?;
+
+        let result = sqlx::query("DELETE FROM share_tokens WHERE space_id = ?1")
+            .bind(&space_id)
+            .execute(&self.registry)
+            .await?;
+
+        let count = result.rows_affected() as usize;
+        info!("Revoked all {} shares for space: {}", count, space_id);
+        Ok(count)
+    }
+
     async fn find_space_by_token(&self, token: &str) -> Result<SpaceDbInfo> {
         let row = sqlx::query(
             "SELECT id, db_path, upload_dir, quota_bytes, status FROM spaces
