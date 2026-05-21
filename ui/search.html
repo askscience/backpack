@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack — Search</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="searchApp()" x-init="init()">
+  <div id="main-nav"></div>
+
+  <div class="page">
+    <div class="page-header">
+      <div class="page-header-group">
+        <div class="page-title">Search</div>
+        <div class="page-sub">Semantic search across all your files.</div>
+      </div>
+    </div>
+
+    <div class="search-wrap">
+      <input type="text" class="search-input"
+        x-model="query" @input="debouncedSearch" @keyup.enter="doSearch"
+        placeholder="Search your files…" autofocus>
+    </div>
+
+    <div id="loading-state"></div>
+
+    <div class="section" x-show="results.length > 0 && !searching">
+      <div class="section-head">
+        <div class="section-title" x-text="`${results.length} result${results.length !== 1 ? 's' : ''}`"></div>
+      </div>
+      <template x-for="r in results" :key="r.id">
+        <div class="search-result">
+          <div class="search-result-title"><a :href="getDownloadUrl(r.id)" x-text="r.original_name"></a></div>
+          <div class="search-result-meta">
+            <span x-text="formatBytes(r.file_size)"></span>
+            <span x-show="r.category"> · </span>
+            <span class="tag" x-text="r.category"></span>
+          </div>
+          <div class="similarity-bar"><div class="similarity-fill" :style="`width: ${Math.round((r.similarity || 0) * 100)}%`"></div></div>
+        </div>
+      </template>
+    </div>
+
+    <div class="empty-state" x-show="searched && results.length === 0 && !searching">
+      <p>No results for "<span x-text="lastQuery"></span>".</p>
+    </div>
+
+    <div class="empty-state" x-show="!searched && query === '' && !searching">
+      <p>Type above to semantically search your files.</p>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/components.js"></script>
+  <script>
+    function searchApp() {
+      return {
+        query: '', results: [], searching: false, searched: false, lastQuery: '', debounceTimer: null,
+        init() {
+          initTheme(); renderNav('search');
+          if (!getToken()) { window.location.href = 'index.html'; return; }
+        },
+        debouncedSearch() {
+          clearTimeout(this.debounceTimer);
+          if (this.query.trim().length < 2) { this.results = []; this.searched = false; return; }
+          this.debounceTimer = setTimeout(() => this.doSearch(), 400);
+        },
+        async doSearch() {
+          const q = this.query.trim();
+          if (!q || q.length < 2) return;
+          this.searching = true; this.lastQuery = q;
+          try { const res = await searchFiles(q); this.results = res.results || []; this.searched = true; }
+          catch (e) { showError('loading-state', e.message); }
+          finally { this.searching = false; }
+        }
+      };
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack — Ask</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="askApp()" x-init="init()">
+  <div id="main-nav"></div>
+
+  <div class="page page-full">
+    <div class="page-header" style="margin-bottom:0">
+      <div class="page-header-group">
+        <div class="page-title">Ask</div>
+        <div class="page-sub">Ask questions about your files — get answers with sources.</div>
+      </div>
+    </div>
+
+    <div class="chat-wrap">
+      <div class="chat-msgs" x-ref="messages">
+        <template x-for="(msg, idx) in messages" :key="idx">
+          <div class="chat-msg" :class="msg.role">
+            <div class="chat-bubble" :class="msg.role">
+              <template x-if="msg.role === 'user'">
+                <div x-text="msg.content"></div>
+              </template>
+              <template x-if="msg.role === 'bot'">
+                <div>
+                  <div class="chat-answer" x-text="msg.content"></div>
+                  <div class="chat-sources" x-show="msg.sources && msg.sources.length > 0">
+                    <div class="sub-list-title">Sources</div>
+                    <template x-for="src in msg.sources" :key="src.id">
+                      <div class="chat-source">
+                        <a :href="getDownloadUrl(src.id)" target="_blank" x-text="src.original_name"></a>
+                        <span class="text-3" x-text="` · ${formatBytes(src.file_size)}`"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+        <div x-show="answering" class="chat-msg bot">
+          <div class="chat-bubble bot"><div class="chat-answer" style="color:var(--text-3)">Thinking…</div></div>
+        </div>
+      </div>
+
+      <div class="chat-input-bar">
+        <input type="text" class="chat-input"
+          x-model="question" @keyup.enter="sendQuestion"
+          placeholder="Ask a question about your files…" :disabled="answering">
+        <button class="btn btn-primary btn-sm" @click="sendQuestion" :disabled="answering || !question.trim()" x-text="answering ? '…' : 'Send'"></button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/components.js"></script>
+  <script>
+    function askApp() {
+      return { question: '', messages: [], answering: false,
+        init() {
+          initTheme(); renderNav('ask');
+          if (!getToken()) { window.location.href = 'index.html'; return; }
+        },
+        async sendQuestion() {
+          const q = this.question.trim();
+          if (!q || this.answering) return;
+          this.messages.push({ role: 'user', content: q });
+          this.question = ''; this.answering = true;
+          try {
+            const res = await askQuestion(q);
+            this.messages.push({ role: 'bot', content: res.answer || res.response || '(no answer)', sources: res.sources || [] });
+            this.$nextTick(() => { const el = this.$refs.messages; if (el) el.scrollTop = el.scrollHeight; });
+          } catch (e) { this.messages.push({ role: 'bot', content: `Error: ${e.message}`, sources: [] }); }
+          finally { this.answering = false; }
+        }
+      };
+    }
+  </script>
+</body>
+</html>

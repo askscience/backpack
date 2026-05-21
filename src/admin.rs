@@ -97,3 +97,10 @@ pub struct DeleteSpaceQuery {
     #[serde(default)]
     pub for_share: Option<String>,
 }
+
+/// Request body for `PUT /api/admin/spaces/:id` — update a space.
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateSpaceRequest {
+    pub label: Option<String>,
+    pub quota_mb: Option<u64>,
+}

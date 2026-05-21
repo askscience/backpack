@@ -463,6 +463,10 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
     info!("Embedding model: {}", config.embedding_model);
     info!("Upload dir: {}", config.upload_dir);
     info!("DB path: {}", config.db_path);
+    if let Some(ref token) = config.admin_token {
+        info!("Admin token: {}", token);
+        info!("Use this token in the UI Admin login to manage spaces.");
+    }
 
     let _skill_content = catalog::read_skill_prompt(&config.skill_path).unwrap_or_else(|e| {
         tracing::warn!("Could not read skill.md: {}. Using default prompt.", e);
@@ -513,9 +517,15 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .route("/spaces", routing::post(admin_routes::create_space)
             .get(admin_routes::list_spaces))
         .route("/spaces/:id", routing::get(admin_routes::space_info)
+            .put(admin_routes::update_space)
             .delete(admin_routes::delete_space))
         .route("/spaces/:id/share", routing::post(admin_routes::share_space))
         .route("/spaces/:id/shares/:share_token/revoke", routing::post(admin_routes::revoke_share_admin))
+        .route("/spaces/:id/regenerate-token", routing::post(admin_routes::regenerate_token))
+        .route("/spaces/:id/reactivate", routing::post(admin_routes::reactivate_space))
+        .route("/shares", routing::get(admin_routes::list_all_shares))
+        .route("/shares/:share_token", routing::delete(admin_routes::delete_share))
+        .route("/archives", routing::get(admin_routes::list_archives))
         .route_layer(axum::middleware::from_fn(move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
             let token = admin_token_for_auth.clone();
             async move {

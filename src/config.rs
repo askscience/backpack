@@ -49,11 +49,17 @@ impl Config {
             .parse()
             .unwrap_or(1536);
 
-        // Admin token: when set, enables /api/admin/* endpoints.
-        // When absent (default), admin routes return 404 for every request.
-        let admin_token = env::var("ADMIN_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty());
+        // Admin token: when set from env, uses that; otherwise generates a random one.
+        // The generated token is printed at startup so admins can use the UI.
+        let admin_token = Some(
+            env::var("ADMIN_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| {
+                    use uuid::Uuid;
+                    format!("bp-admin-{}", Uuid::new_v4())
+                }),
+        );
 
         Ok(Config {
             llm_provider,

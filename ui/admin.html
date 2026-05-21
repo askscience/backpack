@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack — Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="adminApp()" x-init="init()">
+  <div id="main-nav"></div>
+
+  <div class="page">
+    <div class="page-header">
+      <div class="page-header-group">
+        <div class="page-title">Admin</div>
+        <div class="page-sub" x-text="subtitle"></div>
+      </div>
+      <div class="flex-center" style="gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline btn-sm" @click="tab = 'spaces'" :class="{ 'btn-primary': tab === 'spaces' }">Spaces</button>
+        <button class="btn btn-outline btn-sm" @click="tab = 'shares'" :class="{ 'btn-primary': tab === 'shares' }" x-show="allShares.length > 0 || tab === 'shares'">Shares</button>
+        <button class="btn btn-outline btn-sm" @click="tab = 'archives'" :class="{ 'btn-primary': tab === 'archives' }" x-show="allArchives.length > 0 || tab === 'archives'">Archives</button>
+        <button class="btn btn-primary btn-sm" @click="openCreate">Create Space</button>
+      </div>
+    </div>
+
+    <div id="loading-state"></div>
+
+    <!-- Spaces -->
+    <div class="section" x-show="tab === 'spaces' && !loading">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Label</th><th>Quota</th><th>Status</th><th>Shares</th><th>Created</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="s in spaces" :key="s.id">
+              <tr>
+                <td>
+                  <div style="font-weight:600" x-text="s.label"></div>
+                  <div class="mono-cell mono" x-text="s.id"></div>
+                </td>
+                <td>
+                  <div x-text="s.quota_bytes === 0 ? 'Unlimited' : formatBytes(s.used_bytes) + ' / ' + formatBytes(s.quota_bytes)"></div>
+                  <div class="quota-bar" x-show="s.quota_bytes > 0"><div class="quota-fill" :style="`width: ${Math.min(100, Math.round((s.used_bytes / s.quota_bytes) * 100))}%`"></div></div>
+                </td>
+                <td><span class="tag" :class="s.status === 'active' ? 'tag-success' : (s.status === 'frozen' ? 'tag-warn' : 'tag-danger')" x-text="s.status"></span></td>
+                <td x-text="s.shares"></td>
+                <td><span class="caption" x-text="formatDate(s.created_at)"></span></td>
+                <td>
+                  <div class="admin-actions">
+                    <button class="table-btn" @click="openEdit(s)">Edit</button>
+                    <button class="table-btn" @click="openShare(s)">Share</button>
+                    <button class="table-btn" @click="viewSpace(s)">Info</button>
+                    <button class="table-btn" @click="regenerateToken(s)" x-show="s.status === 'active'">Token</button>
+                    <button class="table-btn" @click="reactivate(s)" x-show="s.status === 'frozen'">Reactivate</button>
+                    <button class="table-btn danger" @click="confirmDelete(s)">Delete</button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div class="empty-state" x-show="spaces.length === 0"><p>No spaces yet. Create one to get started.</p></div>
+    </div>
+
+    <!-- Shares -->
+    <div class="section" x-show="tab === 'shares' && !loading">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Share Token</th><th>Label</th><th>Write</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="sh in allShares" :key="sh.share_token">
+              <tr>
+                <td class="mono-cell" x-text="sh.share_token"></td>
+                <td x-text="sh.label"></td>
+                <td x-text="sh.can_write ? 'Yes' : 'No'"></td>
+                <td><button class="table-btn danger" @click="revokeShareByToken(sh.share_token)">Revoke</button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Archives -->
+    <div class="section" x-show="tab === 'archives' && !loading">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Download Token</th><th>Restricted To</th><th>Expires</th><th>Status</th></tr></thead>
+          <tbody>
+            <template x-for="a in allArchives" :key="a.id">
+              <tr>
+                <td class="mono-cell" x-text="truncate(a.download_token, 20)"></td>
+                <td x-text="a.for_share_label || '—'"></td>
+                <td x-text="formatDate(a.expires_at)"></td>
+                <td><span class="tag" :class="a.downloaded ? 'tag-danger' : 'tag-success'" x-text="a.downloaded ? 'downloaded' : 'ready'"></span></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Modal -->
+  <template x-if="showCreateModal">
+    <div class="modal-overlay" @click="showCreateModal = false"><div class="modal" @click.stop>
+      <div class="modal-title">Create Space</div>
+      <div class="modal-input-gap">
+        <input type="text" class="input" x-model="createLabel" placeholder="Label (e.g. Team Docs)" @keyup.enter="doCreate">
+        <input type="number" class="input" x-model="createQuota" placeholder="Quota in MB (0 = unlimited)">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="showCreateModal = false">Cancel</button>
+        <button class="btn btn-primary btn-full" @click="doCreate" x-text="creating ? 'Creating…' : 'Create'"></button>
+      </div>
+    </div></div>
+  </template>
+
+  <!-- Edit Modal -->
+  <template x-if="editTarget">
+    <div class="modal-overlay" @click="editTarget = null"><div class="modal" @click.stop>
+      <div class="modal-title">Edit Space</div>
+      <p class="modal-text" x-text="editTarget.label"></p>
+      <div class="modal-input-gap">
+        <input type="text" class="input" x-model="editLabel" placeholder="New label">
+        <input type="number" class="input" x-model="editQuota" placeholder="New quota in MB (0 = unlimited)">
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="editTarget = null">Cancel</button>
+        <button class="btn btn-primary btn-full" @click="doEdit" x-text="editing ? 'Saving…' : 'Save'"></button>
+      </div>
+    </div></div>
+  </template>
+
+  <!-- Share Modal -->
+  <template x-if="shareTarget">
+    <div class="modal-overlay" @click="shareTarget = null"><div class="modal" @click.stop>
+      <div class="modal-title">Share Space</div>
+      <p class="modal-text" x-text="`Create a share token for: ${shareTarget.label}`"></p>
+      <input type="text" class="input" x-model="shareLabel" placeholder="Label (e.g. Read-only for Alice)" @keyup.enter="doShare">
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="shareTarget = null">Cancel</button>
+        <button class="btn btn-primary btn-full" @click="doShare" x-text="sharing ? 'Creating…' : 'Create Share'"></button>
+      </div>
+    </div></div>
+  </template>
+
+  <!-- Regenerate Token Modal -->
+  <template x-if="tokenTarget">
+    <div class="modal-overlay" @click="tokenTarget = null"><div class="modal" @click.stop>
+      <div class="modal-title">Regenerate Token</div>
+      <p class="modal-text" x-text="`This will invalidate the current owner token for ${tokenTarget.label}. All users will lose access.`"></p>
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="tokenTarget = null">Cancel</button>
+        <button class="btn btn-danger btn-full" @click="doRegenerate" x-text="regenerating ? 'Regenerating…' : 'Regenerate'"></button>
+      </div>
+    </div></div>
+  </template>
+
+  <!-- Reactivate Modal -->
+  <template x-if="reactivateTarget">
+    <div class="modal-overlay" @click="reactivateTarget = null"><div class="modal" @click.stop>
+      <div class="modal-title">Reactivate Space</div>
+      <p class="modal-text" x-text="`Reactivate ${reactivateTarget.label}? Files will be accessible again.`"></p>
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="reactivateTarget = null">Cancel</button>
+        <button class="btn btn-primary btn-full" @click="doReactivate" x-text="reactivating ? 'Reactivating…' : 'Reactivate'"></button>
+      </div>
+    </div></div>
+  </template>
+
+  <!-- Delete Modal -->
+  <template x-if="deleteTarget">
+    <div class="modal-overlay" @click="deleteTarget = null"><div class="modal" @click.stop>
+      <div class="modal-title">Delete Space</div>
+      <p class="modal-text" x-text="`Delete ${deleteTarget.label}? All files will be ${deleteMode === 'purge' ? 'permanently destroyed' : 'archived first'}.`"></p>
+      <div style="display:flex;gap:24px;margin:16px 0">
+        <label style="cursor:pointer;display:flex;align-items:center;gap:8px"><input type="radio" name="deleteMode" value="purge" x-model="deleteMode" style="accent-color:var(--text)"> Purge</label>
+        <label style="cursor:pointer;display:flex;align-items:center;gap:8px"><input type="radio" name="deleteMode" value="archive" x-model="deleteMode" style="accent-color:var(--text)"> Archive</label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="deleteTarget = null">Cancel</button>
+        <button class="btn btn-danger btn-full" @click="doDelete" x-text="deleting ? 'Deleting…' : 'Delete'"></button>
+      </div>
+    </div></div>
+  </template>
+
+  <!-- Info Modal -->
+  <template x-if="infoTarget">
+    <div class="modal-overlay" @click="infoTarget = null"><div class="modal" @click.stop style="max-width:560px">
+      <div class="modal-title" x-text="infoTarget.label"></div>
+      <div class="info-grid">
+        <span class="label">ID:</span><span class="value mono" x-text="infoTarget.id"></span>
+        <span class="label">Status:</span><span class="value" x-text="infoTarget.status"></span>
+        <span class="label">Quota:</span><span class="value" x-text="infoTarget.quota_bytes === 0 ? 'Unlimited' : formatBytes(infoTarget.quota_bytes)"></span>
+        <span class="label">Used:</span><span class="value" x-text="formatBytes(infoTarget.used_bytes || 0)"></span>
+        <span class="label">Owner:</span><span class="value mono" x-text="truncate(infoTarget.owner_token, 24)"></span>
+        <span class="label">Created:</span><span class="value" x-text="formatDate(infoTarget.created_at)"></span>
+      </div>
+
+      <div x-show="infoTarget.shares && infoTarget.shares.length > 0" class="mt-24">
+        <div class="sub-list-title">Shares</div>
+        <template x-for="sh in infoTarget.shares" :key="sh.share_token">
+          <div class="sub-list-item">
+            <div><div class="body-sm" x-text="sh.label"></div><div class="mono text-3" x-text="truncate(sh.share_token, 28)"></div></div>
+            <button class="table-btn danger" @click="revokeShare(infoTarget, sh.share_token)">Revoke</button>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="infoTarget.archives && infoTarget.archives.length > 0" class="mt-24">
+        <div class="sub-list-title">Archives</div>
+        <template x-for="a in infoTarget.archives" :key="a.id">
+          <div class="sub-list-item">
+            <div><div class="mono" x-text="truncate(a.download_token, 20)"></div><div class="caption" x-text="formatDate(a.expires_at) + ' · ' + (a.downloaded ? 'downloaded' : 'ready')"></div></div>
+          </div>
+        </template>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="infoTarget = null">Close</button>
+      </div>
+    </div></div>
+  </template>
+
+  <script src="js/api.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/components.js"></script>
+  <script>
+    function adminApp() {
+      return {
+        tab: 'spaces', subtitle: '', spaces: [], allShares: [], allArchives: [], loading: true,
+        showCreateModal: false, createLabel: '', createQuota: 500, creating: false,
+        editTarget: null, editLabel: '', editQuota: '', editing: false,
+        shareTarget: null, shareLabel: '', sharing: false,
+        tokenTarget: null, regenerating: false,
+        reactivateTarget: null, reactivating: false,
+        deleteTarget: null, deleteMode: 'purge', deleting: false,
+        infoTarget: null,
+
+        async init() {
+          initTheme(); renderNav('admin');
+          if (!getAdminToken()) { window.location.href = 'index.html'; return; }
+          await this.loadAll();
+        },
+        async loadAll() {
+          this.loading = true;
+          try {
+            const [s, sh, a] = await Promise.all([
+              getAdminSpaces().catch(() => []), getAdminAllShares().catch(() => []), getAdminArchives().catch(() => []),
+            ]);
+            this.spaces = Array.isArray(s) ? s : [];
+            this.allShares = Array.isArray(sh) ? sh : [];
+            this.allArchives = Array.isArray(a) ? a : [];
+            this.subtitle = `${this.spaces.length} space${this.spaces.length !== 1 ? 's' : ''}`;
+          } catch (e) { showError('loading-state', e.message); }
+          finally { this.loading = false; }
+        },
+
+        openCreate() { this.createLabel = ''; this.createQuota = 500; this.showCreateModal = true; },
+        async doCreate() {
+          if (!this.createLabel.trim()) return; this.creating = true;
+          try { await createAdminSpace(this.createLabel.trim(), Number(this.createQuota) || 0); toast('Space created'); this.showCreateModal = false; await this.loadAll(); }
+          catch (e) { toast(e.message, true); } finally { this.creating = false; }
+        },
+
+        openEdit(space) { this.editTarget = space; this.editLabel = space.label; this.editQuota = space.quota_bytes > 0 ? Math.round(space.quota_bytes / (1024 * 1024)) : ''; },
+        async doEdit() {
+          if (!this.editTarget) return; this.editing = true;
+          try {
+            const data = {};
+            if (this.editLabel.trim() && this.editLabel.trim() !== this.editTarget.label) data.label = this.editLabel.trim();
+            const q = this.editQuota !== '' ? Number(this.editQuota) : null;
+            if (q !== null && q !== Math.round(this.editTarget.quota_bytes / (1024 * 1024))) data.quota_mb = q;
+            if (Object.keys(data).length > 0) { await updateAdminSpace(this.editTarget.id, data); toast('Space updated'); }
+            this.editTarget = null; await this.loadAll();
+          } catch (e) { toast(e.message, true); } finally { this.editing = false; }
+        },
+
+        openShare(space) { this.shareTarget = space; this.shareLabel = ''; },
+        async doShare() {
+          if (!this.shareTarget || !this.shareLabel.trim()) return; this.sharing = true;
+          try { await createAdminShare(this.shareTarget.id, this.shareLabel.trim()); toast('Share token created'); this.shareTarget = null; await this.loadAll(); }
+          catch (e) { toast(e.message, true); } finally { this.sharing = false; }
+        },
+
+        regenerateToken(space) { this.tokenTarget = space; },
+        async doRegenerate() {
+          if (!this.tokenTarget) return; this.regenerating = true;
+          try { await regenerateAdminToken(this.tokenTarget.id); toast('Token regenerated'); this.tokenTarget = null; await this.loadAll(); }
+          catch (e) { toast(e.message, true); } finally { this.regenerating = false; }
+        },
+
+        reactivate(space) { this.reactivateTarget = space; },
+        async doReactivate() {
+          if (!this.reactivateTarget) return; this.reactivating = true;
+          try { await reactivateAdminSpace(this.reactivateTarget.id); toast('Space reactivated'); this.reactivateTarget = null; await this.loadAll(); }
+          catch (e) { toast(e.message, true); } finally { this.reactivating = false; }
+        },
+
+        confirmDelete(space) { this.deleteTarget = space; this.deleteMode = 'purge'; },
+        async doDelete() {
+          if (!this.deleteTarget) return; this.deleting = true;
+          try { await deleteAdminSpace(this.deleteTarget.id, this.deleteMode); toast(this.deleteMode === 'archive' ? 'Space archived' : 'Space deleted'); this.deleteTarget = null; await this.loadAll(); }
+          catch (e) { toast(e.message, true); } finally { this.deleting = false; }
+        },
+
+        async viewSpace(space) { try { this.infoTarget = await getAdminSpace(space.id); } catch (e) { toast(e.message, true); } },
+        async revokeShare(space, shareToken) {
+          try { await revokeAdminShare(space.id, shareToken); toast('Share revoked'); this.infoTarget = await getAdminSpace(space.id); await this.loadAll(); }
+          catch (e) { toast(e.message, true); }
+        },
+        async revokeShareByToken(shareToken) {
+          try { await deleteAdminShare(shareToken); toast('Share revoked'); await this.loadAll(); }
+          catch (e) { toast(e.message, true); }
+        }
+      };
+    }
+  </script>
+</body>
+</html>

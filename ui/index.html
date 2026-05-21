@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="loginApp()" x-init="init()">
+  <div class="login-page">
+    <div class="login-brand">
+      <div class="login-wordmark">BACKPACK</div>
+      <div class="login-tagline">Your personal AI-cloud. Upload, search, and ask questions about your files — powered by LLM cataloging and semantic search.</div>
+    </div>
+    <div class="login-form-wrap">
+      <div class="login-form-title">Access</div>
+      <div class="login-form-subtitle">Enter a space token or admin token.</div>
+
+      <template x-if="!showAdmin">
+        <div>
+          <div class="col-gap-16">
+            <input type="text" class="input input-line" x-model="spaceToken" placeholder="Space token" @keyup.enter="connectSpace">
+            <button class="btn btn-primary btn-full" @click="connectSpace" x-text="connecting ? 'Connecting…' : 'Enter Space'"></button>
+          </div>
+          <div class="login-divider">or</div>
+          <button class="btn btn-outline btn-full" @click="showAdmin = true">Admin access</button>
+        </div>
+      </template>
+
+      <template x-if="showAdmin">
+        <div>
+          <div class="col-gap-16">
+            <input type="password" class="input input-line" x-model="adminToken" placeholder="Admin token" @keyup.enter="connectAdmin">
+            <button class="btn btn-primary btn-full" @click="connectAdmin" x-text="connecting ? 'Connecting…' : 'Enter Admin'"></button>
+          </div>
+          <div class="login-divider">or</div>
+          <button class="btn btn-outline btn-full" @click="showAdmin = false">Space token</button>
+        </div>
+      </template>
+
+      <div class="login-server-box">
+        <input type="text" class="input input-line" x-model="apiBaseUrl" placeholder="Server URL (default: http://localhost:8080)" style="font-size:0.8125rem">
+      </div>
+      <div class="login-err" x-show="error" x-text="error"></div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/components.js"></script>
+  <script>
+    function loginApp() {
+      return {
+        spaceToken: '', adminToken: '',
+        apiBaseUrl: localStorage.getItem('api_base_url') || 'http://localhost:8080',
+        showAdmin: false, connecting: false, error: '',
+        init() {
+          initTheme();
+          if (getToken()) { window.location.href = 'dashboard.html'; return; }
+          if (getAdminToken()) { window.location.href = 'admin.html'; return; }
+        },
+        async connectSpace() {
+          if (!this.spaceToken.trim()) return;
+          this.connecting = true; this.error = '';
+          setApiBaseUrl(this.apiBaseUrl);
+          setToken(this.spaceToken.trim());
+          try { await getInventory(); window.location.href = 'dashboard.html'; return; } catch (_) {}
+          setAdminToken(this.spaceToken.trim());
+          try { await getAdminSpaces(); window.location.href = 'admin.html'; return; } catch (_) {}
+          this.error = 'Invalid token — not a space token nor an admin token';
+          clearTokens(); this.connecting = false;
+        },
+        async connectAdmin() {
+          if (!this.adminToken.trim()) return;
+          this.connecting = true; this.error = '';
+          setApiBaseUrl(this.apiBaseUrl);
+          setAdminToken(this.adminToken.trim());
+          try { await getAdminSpaces(); window.location.href = 'admin.html'; }
+          catch (e) { this.error = e.message || 'Failed to authenticate'; clearTokens(); this.connecting = false; }
+        }
+      };
+    }
+  </script>
+</body>
+</html>

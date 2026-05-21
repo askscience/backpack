@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="dashboardApp()" x-init="init()">
+  <div id="main-nav"></div>
+
+  <div class="page">
+    <div class="page-header">
+      <div class="page-header-group">
+        <div class="page-title" x-text="`Hello${name ? ', ' + name : ''}.`"></div>
+        <div class="page-sub" x-text="subtitle"></div>
+      </div>
+    </div>
+
+    <div class="stats-grid" x-show="!loading">
+      <div class="stat-card"><div class="stat-value" x-text="totalFiles"></div><div class="stat-label">Files</div></div>
+      <div class="stat-card"><div class="stat-value" x-text="totalCategories"></div><div class="stat-label">Categories</div></div>
+      <div class="stat-card"><div class="stat-value" x-text="totalSize"></div><div class="stat-label">Storage</div></div>
+    </div>
+
+    <div id="loading-state"></div>
+
+    <div class="section" x-show="!loading && files.length > 0">
+      <div class="section-head">
+        <div class="section-title">Recent files</div>
+        <a href="files.html" class="btn btn-ghost btn-sm">View all →</a>
+      </div>
+      <div class="file-list">
+        <template x-for="file in files" :key="file.id">
+          <div class="file-item">
+            <img class="file-icon-svg" :src="fileIconPath(file.mime)" alt="">
+            <div class="file-info">
+              <div class="file-name" x-text="file.original_name"></div>
+              <div class="file-meta">
+                <span x-text="formatBytes(file.file_size)"></span>
+                <span x-show="file.category"> · </span>
+                <span x-text="file.category"></span>
+                <span> · </span>
+                <span x-text="timeAgo(file.created_at)"></span>
+              </div>
+            </div>
+            <div class="file-actions">
+              <a :href="getDownloadUrl(file.id)" class="table-btn">Download</a>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div class="empty-state" x-show="!loading && files.length === 0">
+      <p>No files yet. Upload something to get started.</p>
+      <div class="mt-16"><a href="files.html" class="btn btn-outline">Upload files</a></div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/components.js"></script>
+  <script>
+    function dashboardApp() {
+      return {
+        name: '', subtitle: '', totalFiles: 0, totalCategories: 0, totalSize: '0 B', files: [], loading: true,
+        async init() {
+          initTheme(); renderNav('dashboard');
+          if (!getToken()) { window.location.href = 'index.html'; return; }
+          try {
+            const inv = await getInventory();
+            this.totalFiles = inv.total_files || 0;
+            this.totalSize = formatBytes(inv.total_size || 0);
+            this.subtitle = `${this.totalFiles} file${this.totalFiles !== 1 ? 's' : ''} across your space`;
+            if (inv.categories) {
+              this.totalCategories = inv.categories.length;
+              const all = [];
+              for (const cat of inv.categories) for (const f of (cat.files || [])) all.push(f);
+              all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+              this.files = all.slice(0, 10);
+            }
+          } catch (e) { showError('loading-state', e.message); }
+          finally { this.loading = false; }
+        }
+      };
+    }
+  </script>
+</body>
+</html>

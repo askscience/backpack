@@ -14,7 +14,7 @@ use axum::{
     Json,
 };
 
-use crate::admin::{CreateSpaceRequest, DeleteSpaceQuery, ShareSpaceRequest};
+use crate::admin::{CreateSpaceRequest, DeleteSpaceQuery, ShareSpaceRequest, UpdateSpaceRequest};
 use crate::handlers::{ApiError, AppState};
 use crate::spaces::DeleteMode;
 
@@ -200,4 +200,124 @@ pub async fn revoke_share_admin(
         "space_id": revoked_space_id,
         "share_token": share_token,
     })))
+}
+
+/// `PUT /api/admin/spaces/:id`
+///
+/// Updates a space's label and/or quota. Both fields are optional —
+/// only the provided fields are updated. Returns the updated `SpaceEntry`.
+pub async fn update_space(
+    State(state): State<AppState>,
+    Path(space_id): Path<String>,
+    Json(body): Json<UpdateSpaceRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let entry = state
+        .spaces
+        .update_space(&space_id, body.label.as_deref(), body.quota_mb)
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to update space: {}", e)))?;
+
+    let json = serde_json::to_value(&entry)
+        .map_err(|e| ApiError::new(format!("Serialization error: {}", e)))?;
+
+    Ok(Json(json))
+}
+
+/// `POST /api/admin/spaces/:id/regenerate-token`
+///
+/// Rotates the owner_token for a space. The old token is immediately
+/// invalidated. Returns `{ "new_token": "..." }`.
+pub async fn regenerate_token(
+    State(state): State<AppState>,
+    Path(space_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let new_token = state
+        .spaces
+        .regenerate_owner_token(&space_id)
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to regenerate token: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "new_token": new_token,
+        "space_id": space_id,
+    })))
+}
+
+/// `POST /api/admin/spaces/:id/reactivate`
+///
+/// Reactivates a frozen space, changing its status back to `active`.
+pub async fn reactivate_space(
+    State(state): State<AppState>,
+    Path(space_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .spaces
+        .reactivate_space(&space_id)
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to reactivate space: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "reactivated": true,
+        "space_id": space_id,
+    })))
+}
+
+/// `GET /api/admin/shares`
+///
+/// Lists all share tokens across all spaces.
+pub async fn list_all_shares(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let shares = state
+        .spaces
+        .list_all_shares()
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to list shares: {}", e)))?;
+
+    let json = serde_json::to_value(&shares)
+        .map_err(|e| ApiError::new(format!("Serialization error: {}", e)))?;
+
+    Ok(Json(json))
+}
+
+/// `DELETE /api/admin/shares/:share_token`
+///
+/// Revokes a share token directly by its token value. No space ID
+/// lookup required.
+pub async fn delete_share(
+    State(state): State<AppState>,
+    Path(share_token): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let space_id = state
+        .spaces
+        .delete_share_by_token(&share_token)
+        .await
+        .map_err(|e| ApiError::not_found(format!("Failed to delete share: {}", e)))?;
+
+    state.sync_hub.broadcast_revoked(&space_id).await;
+    state.sync_hub.revoke_space_tokens(&space_id).await;
+
+    Ok(Json(serde_json::json!({
+        "revoked": true,
+        "space_id": space_id,
+        "share_token": share_token,
+    })))
+}
+
+/// `GET /api/admin/archives`
+///
+/// Lists all space archives with their expiry info and download status.
+pub async fn list_archives(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let archives = state
+        .spaces
+        .list_all_archives()
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to list archives: {}", e)))?;
+
+    let json = serde_json::to_value(&archives)
+        .map_err(|e| ApiError::new(format!("Serialization error: {}", e)))?;
+
+    Ok(Json(json))
 }

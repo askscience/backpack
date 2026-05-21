@@ -44,6 +44,8 @@ pub struct SpaceEntry {
     pub owner_token: String,
     pub quota_mb: u64,
     pub used_mb: f64,
+    pub quota_bytes: u64,
+    pub used_bytes: u64,
     pub shares: usize,
     pub status: String,
 }
@@ -55,6 +57,8 @@ pub struct SpaceInfo {
     pub owner_token: String,
     pub quota_mb: u64,
     pub used_mb: f64,
+    pub quota_bytes: u64,
+    pub used_bytes: u64,
     pub status: String,
     pub shares: Vec<ShareInfo>,
     pub archives: Vec<ArchiveInfo>,
@@ -404,14 +408,20 @@ impl SpaceManager {
 
         Ok(rows
             .iter()
-            .map(|r| SpaceEntry {
-                id: r.get("id"),
-                label: r.get("label"),
-                owner_token: r.get("owner_token"),
-                quota_mb: r.get::<i64, _>("quota_bytes") as u64 / (1024 * 1024),
-                used_mb: r.get::<i64, _>("used_bytes") as f64 / (1024.0 * 1024.0),
-                shares: r.get::<i64, _>("share_count") as usize,
-                status: r.get("status"),
+            .map(|r| {
+                let quota: i64 = r.get("quota_bytes");
+                let used: i64 = r.get("used_bytes");
+                SpaceEntry {
+                    id: r.get("id"),
+                    label: r.get("label"),
+                    owner_token: r.get("owner_token"),
+                    quota_mb: quota as u64 / (1024 * 1024),
+                    used_mb: used as f64 / (1024.0 * 1024.0),
+                    quota_bytes: quota as u64,
+                    used_bytes: used as u64,
+                    shares: r.get::<i64, _>("share_count") as usize,
+                    status: r.get("status"),
+                }
             })
             .collect())
     }
@@ -468,6 +478,8 @@ impl SpaceManager {
             owner_token: row.get("owner_token"),
             quota_mb: row.get::<i64, _>("quota_bytes") as u64 / (1024 * 1024),
             used_mb: row.get::<i64, _>("used_bytes") as f64 / (1024.0 * 1024.0),
+            quota_bytes: row.get::<i64, _>("quota_bytes") as u64,
+            used_bytes: row.get::<i64, _>("used_bytes") as u64,
             status: row.get("status"),
             shares,
             archives,
@@ -634,6 +646,142 @@ impl SpaceManager {
 
         row.map(|r| r.get::<String, _>("owner_token"))
             .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space_id))
+    }
+
+    pub async fn update_space(&self, space_id: &str, label: Option<&str>, quota_mb: Option<u64>) -> Result<SpaceEntry> {
+        if let Some(lbl) = label {
+            sqlx::query("UPDATE spaces SET label = ?1 WHERE id = ?2 AND status != 'deleted'")
+                .bind(lbl)
+                .bind(space_id)
+                .execute(&self.registry)
+                .await?;
+        }
+        if let Some(qmb) = quota_mb {
+            let quota_bytes = qmb * 1024 * 1024;
+            sqlx::query("UPDATE spaces SET quota_bytes = ?1 WHERE id = ?2 AND status != 'deleted'")
+                .bind(quota_bytes as i64)
+                .bind(space_id)
+                .execute(&self.registry)
+                .await?;
+        }
+
+        let row = sqlx::query(
+            r#"SELECT s.id, s.label, s.owner_token, s.quota_bytes, s.used_bytes, s.status,
+               (SELECT COUNT(*) FROM share_tokens WHERE space_id = s.id) as share_count
+               FROM spaces s WHERE s.id = ?1"#,
+        )
+        .bind(space_id)
+        .fetch_optional(&self.registry)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space_id))?;
+
+        let quota: i64 = row.get("quota_bytes");
+        let used: i64 = row.get("used_bytes");
+        Ok(SpaceEntry {
+            id: row.get("id"),
+            label: row.get("label"),
+            owner_token: row.get("owner_token"),
+            quota_mb: quota as u64 / (1024 * 1024),
+            used_mb: used as f64 / (1024.0 * 1024.0),
+            quota_bytes: quota as u64,
+            used_bytes: used as u64,
+            shares: row.get::<i64, _>("share_count") as usize,
+            status: row.get("status"),
+        })
+    }
+
+    pub async fn regenerate_owner_token(&self, space_id: &str) -> Result<String> {
+        let new_token = Uuid::new_v4().to_string().replace('-', "");
+        let affected = sqlx::query(
+            "UPDATE spaces SET owner_token = ?1 WHERE id = ?2 AND status != 'deleted'",
+        )
+        .bind(&new_token)
+        .bind(space_id)
+        .execute(&self.registry)
+        .await?;
+
+        if affected.rows_affected() == 0 {
+            anyhow::bail!("Space not found or already deleted: {}", space_id);
+        }
+
+        info!("Owner token regenerated for space: {}", space_id);
+        Ok(new_token)
+    }
+
+    pub async fn reactivate_space(&self, space_id: &str) -> Result<()> {
+        let affected = sqlx::query(
+            "UPDATE spaces SET status = 'active' WHERE id = ?1 AND status = 'frozen'",
+        )
+        .bind(space_id)
+        .execute(&self.registry)
+        .await?;
+
+        if affected.rows_affected() == 0 {
+            anyhow::bail!("Space is not frozen or does not exist: {}", space_id);
+        }
+
+        info!("Space reactivated: {}", space_id);
+        Ok(())
+    }
+
+    pub async fn list_all_shares(&self) -> Result<Vec<ShareInfo>> {
+        let rows = sqlx::query(
+            "SELECT share_token, label, can_write FROM share_tokens ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.registry)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| ShareInfo {
+                share_token: r.get("share_token"),
+                label: r.get("label"),
+                can_write: r.get::<i64, _>("can_write") != 0,
+            })
+            .collect())
+    }
+
+    pub async fn delete_share_by_token(&self, share_token: &str) -> Result<String> {
+        let row = sqlx::query("SELECT space_id FROM share_tokens WHERE share_token = ?1")
+            .bind(share_token)
+            .fetch_optional(&self.registry)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Share token not found: {}", share_token))?;
+
+        let space_id: String = row.get("space_id");
+
+        sqlx::query("DELETE FROM share_tokens WHERE share_token = ?1")
+            .bind(share_token)
+            .execute(&self.registry)
+            .await?;
+
+        info!(
+            "Share deleted by admin: space={}, token={}",
+            space_id,
+            &share_token[..12.min(share_token.len())]
+        );
+
+        Ok(space_id)
+    }
+
+    pub async fn list_all_archives(&self) -> Result<Vec<ArchiveInfo>> {
+        let rows = sqlx::query(
+            r#"SELECT id, for_share_token, download_token, expires_at, downloaded
+               FROM archive_links ORDER BY created_at DESC"#,
+        )
+        .fetch_all(&self.registry)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| ArchiveInfo {
+                id: r.get("id"),
+                for_share_label: r.get::<Option<String>, _>("for_share_token"),
+                download_token: r.get("download_token"),
+                expires_at: r.get("expires_at"),
+                downloaded: r.get::<i64, _>("downloaded") != 0,
+            })
+            .collect())
     }
 
     #[allow(dead_code)]

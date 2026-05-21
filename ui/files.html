@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack — Files</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body x-data="filesApp()" x-init="init()">
+  <div id="main-nav"></div>
+
+  <div class="page">
+    <div class="page-header">
+      <div class="page-header-group">
+        <div class="page-title">Files</div>
+        <div class="page-sub" x-text="`${totalFiles} file${totalFiles !== 1 ? 's' : ''} · ${totalSize}`"></div>
+      </div>
+      <button class="btn btn-primary" @click="showUpload = !showUpload">Upload</button>
+    </div>
+
+    <div x-show="showUpload" class="section" x-transition>
+      <div class="upload-zone"
+        @dragover.prevent="dragOver = true"
+        @dragleave.prevent="dragOver = false"
+        @drop.prevent="handleDrop($event)"
+        :class="{ 'drag-over': dragOver }"
+        @click="document.getElementById('file-input').click()">
+        <div class="upload-zone-icon">↑</div>
+        <div class="upload-zone-text" x-text="uploading ? 'Uploading…' : 'Drop files here or click to browse'"></div>
+        <div class="upload-zone-hint" x-show="uploadError" x-text="uploadError" style="color:#ff0000"></div>
+        <input type="file" id="file-input" multiple class="hidden" @change="handleFiles($event.target.files)">
+      </div>
+    </div>
+
+    <div id="loading-state"></div>
+
+    <template x-for="(category, idx) in categories" :key="category.name">
+      <div class="category-group" x-show="!loading">
+        <div class="category-header" @click="category.open = !category.open">
+          <div class="flex-center" style="gap:8px">
+            <span class="category-label" x-text="category.name || 'Uncategorized'"></span>
+            <span class="category-count" x-text="`(${category.files ? category.files.length : 0})`"></span>
+          </div>
+          <span class="category-toggle" x-text="category.open ? '−' : '+'"></span>
+        </div>
+        <div class="category-body" x-show="category.open" x-transition>
+          <template x-for="file in (category.files || [])" :key="file.id">
+            <div class="file-item">
+              <img class="file-icon-svg" :src="fileIconPath(file.mime)" alt="">
+              <div class="file-info">
+                <div class="file-name" x-text="file.original_name"></div>
+                <div class="file-meta">
+                  <span x-text="formatBytes(file.file_size)"></span>
+                  <span> · </span>
+                  <span x-text="timeAgo(file.created_at)"></span>
+                  <span x-show="file.title"> · </span>
+                  <span x-text="file.title"></span>
+                </div>
+              </div>
+              <div class="file-actions">
+                <a :href="getDownloadUrl(file.id)" class="table-btn">Download</a>
+                <button class="table-btn danger" @click="confirmDelete(file)">Delete</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <div class="empty-state" x-show="!loading && categories.length === 0"><p>No files yet.</p></div>
+  </div>
+
+  <template x-if="deleteTarget">
+    <div class="modal-overlay" @click="deleteTarget = null">
+      <div class="modal" @click.stop>
+        <div class="modal-title">Delete file?</div>
+        <div class="modal-text" x-text="deleteTarget ? deleteTarget.original_name : ''"></div>
+        <div class="modal-actions">
+          <button class="btn btn-outline btn-full" @click="deleteTarget = null">Cancel</button>
+          <button class="btn btn-danger btn-full" @click="doDelete" x-text="deleting ? 'Deleting…' : 'Delete'"></button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <script src="js/api.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/components.js"></script>
+  <script>
+    function filesApp() {
+      return {
+        categories: [], totalFiles: 0, totalSize: '0 B', loading: true,
+        showUpload: false, uploadError: '', uploading: false, dragOver: false,
+        deleteTarget: null, deleting: false,
+        async init() {
+          initTheme(); renderNav('files');
+          if (!getToken()) { window.location.href = 'index.html'; return; }
+          await this.loadFiles();
+        },
+        async loadFiles() {
+          this.loading = true;
+          try {
+            const inv = await getInventory();
+            this.totalFiles = inv.total_files || 0;
+            this.totalSize = formatBytes(inv.total_size || 0);
+            if (inv.categories) this.categories = inv.categories.map(c => ({ ...c, open: true }));
+          } catch (e) { showError('loading-state', e.message); }
+          finally { this.loading = false; }
+        },
+        handleDrop(e) { this.dragOver = false; if (e.dataTransfer.files.length) this.uploadFiles(e.dataTransfer.files); },
+        handleFiles(files) { if (files.length) this.uploadFiles(files); },
+        async uploadFiles(files) {
+          this.uploading = true; this.uploadError = '';
+          try { await uploadFiles(files); await this.loadFiles(); this.showUpload = false; toast('Files uploaded'); }
+          catch (e) { this.uploadError = e.message; }
+          finally { this.uploading = false; }
+        },
+        confirmDelete(file) { this.deleteTarget = file; },
+        async doDelete() {
+          if (!this.deleteTarget) return;
+          this.deleting = true;
+          try { await deleteFile(this.deleteTarget.id); toast('File deleted'); this.deleteTarget = null; await this.loadFiles(); }
+          catch (e) { toast(e.message, true); }
+          finally { this.deleting = false; }
+        }
+      };
+    }
+  </script>
+</body>
+</html>
