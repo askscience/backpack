@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -8,11 +9,13 @@ use url::Url;
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
+const CHALLENGE_TTL_SECS: u64 = 300;
+
 pub struct WebauthnApp {
     pub webauthn: Webauthn,
     pub origin: Url,
-    pub challenges: Mutex<HashMap<String, (PasskeyRegistration, String)>>,
-    pub auth_challenges: Mutex<HashMap<String, PasskeyAuthentication>>,
+    pub challenges: Mutex<HashMap<String, (PasskeyRegistration, String, Instant)>>,
+    pub auth_challenges: Mutex<HashMap<String, (PasskeyAuthentication, Instant)>>,
 }
 
 impl WebauthnApp {
@@ -29,6 +32,18 @@ impl WebauthnApp {
             challenges: Mutex::new(HashMap::new()),
             auth_challenges: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn purge_expired_challenges(&self) {
+        let now = Instant::now();
+        {
+            let mut reg = self.challenges.lock().unwrap();
+            reg.retain(|_, (_, _, ts)| now.duration_since(*ts).as_secs() < CHALLENGE_TTL_SECS);
+        }
+        {
+            let mut auth = self.auth_challenges.lock().unwrap();
+            auth.retain(|_, (_, ts)| now.duration_since(*ts).as_secs() < CHALLENGE_TTL_SECS);
+        }
     }
 
     pub fn start_registration(
@@ -52,7 +67,7 @@ impl WebauthnApp {
         self.challenges
             .lock()
             .unwrap()
-            .insert(challenge_id.clone(), (reg_state, user_id.to_string()));
+            .insert(challenge_id.clone(), (reg_state, user_id.to_string(), Instant::now()));
 
         Ok((ccr, challenge_id))
     }
@@ -62,7 +77,7 @@ impl WebauthnApp {
         challenge_id: &str,
         credential: &RegisterPublicKeyCredential,
     ) -> Result<Passkey> {
-        let (reg_state, _user_id) = self
+        let (reg_state, _user_id, _ts) = self
             .challenges
             .lock()
             .unwrap()
@@ -88,7 +103,7 @@ impl WebauthnApp {
         self.auth_challenges
             .lock()
             .unwrap()
-            .insert(challenge_id.clone(), auth_state);
+            .insert(challenge_id.clone(), (auth_state, Instant::now()));
 
         Ok((rcr, challenge_id))
     }
@@ -98,7 +113,7 @@ impl WebauthnApp {
         challenge_id: &str,
         credential: &PublicKeyCredential,
     ) -> Result<AuthenticationResult> {
-        let auth_state = self
+        let (auth_state, _ts) = self
             .auth_challenges
             .lock()
             .unwrap()
@@ -245,10 +260,17 @@ pub async fn delete_session(pool: &sqlx::SqlitePool, token: &str) -> Result<()> 
     sqlx::query("DELETE FROM sessions WHERE session_token = ?1")
         .bind(token)
         .execute(pool)
-        .await?;
+    .await?;
+
     Ok(())
 }
 
+pub async fn purge_expired_sessions(pool: &sqlx::SqlitePool) -> Result<()> {
+    sqlx::query("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
 pub async fn ensure_webauthn_schema(pool: &sqlx::SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS webauthn_keys (

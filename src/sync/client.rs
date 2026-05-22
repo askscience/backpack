@@ -107,16 +107,48 @@ impl SyncClient {
         Ok(())
     }
 
-    fn endpoint(&self, path: &str) -> String {
-        if let Some(ref token) = self.space_token {
-            format!("{}{}?token={}", self.server_url, path, urlencode(token))
-        } else {
-            format!("{}{}", self.server_url, path)
+    /// Fetch server-side sync configuration for this space.
+    pub async fn get_sync_config(&self) -> Result<serde_json::Value> {
+        let url = self.endpoint("/sync/config");
+        debug!("GET {}", url);
+        let resp = self.inner.get(&url).headers(self.auth_headers()).send().await
+            .with_context(|| format!("Failed to get sync config from {}", url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Sync config fetch failed: HTTP {} — {}", status, body);
         }
+        resp.json().await.context("Failed to parse sync config response")
+    }
+
+    /// Report local sync status entries to the server.
+    pub async fn report_sync_status(&self, entries: &[serde_json::Value]) -> Result<()> {
+        let url = self.endpoint("/sync/status");
+        let body = serde_json::json!({ "entries": entries });
+        let resp = self.inner.post(&url).headers(self.auth_headers())
+            .json(&body).send().await
+            .with_context(|| format!("Failed to report sync status to {}", url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Sync status report failed: HTTP {} — {}", status, body);
+        }
+        Ok(())
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}{}", self.server_url, path)
     }
 
     fn auth_headers(&self) -> reqwest::header::HeaderMap {
-        reqwest::header::HeaderMap::new()
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(ref token) = self.space_token {
+            let bearer = format!("Bearer {}", token);
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(&bearer) {
+                headers.insert(reqwest::header::AUTHORIZATION, val);
+            }
+        }
+        headers
     }
 }
 

@@ -6,7 +6,9 @@
 <title>Backpack</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles/app.css">
-<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"
+  integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+  crossorigin="anonymous"></script>
 </head>
 <body x-data="loginApp()" x-init="init()">
   <div class="login-page">
@@ -78,7 +80,10 @@
               setAdminToken(result.session_token);
               window.location.href = 'admin.html';
             } else {
-              setToken(result.session_token);
+              setSessionToken(result.session_token);
+              if (result.space_token) {
+                setToken(result.space_token);
+              }
               window.location.href = 'dashboard.html';
             }
           } catch (e) {
@@ -94,10 +99,12 @@
           try {
             const result = await webauthnRegister(this.registerToken.trim());
             if (result.role === 'admin') {
+              setToken(this.registerToken.trim());
               setAdminToken(result.session_token);
               window.location.href = 'admin.html';
             } else {
-              setToken(result.session_token);
+              setToken(this.registerToken.trim());
+              setSessionToken(result.session_token);
               window.location.href = 'dashboard.html';
             }
           } catch (e) {

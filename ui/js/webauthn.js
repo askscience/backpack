@@ -64,13 +64,18 @@ async function webauthnAuthenticate() {
 }
 
 async function getSpaceShares(token) {
-  const res = await fetch(`${API_BASE_URL}/space/shares?token=${encodeURIComponent(token)}`);
+  const res = await fetch(`${API_BASE_URL}/space/shares`, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 async function revokeAllSpaceShares(token) {
-  const res = await fetch(`${API_BASE_URL}/space/shares/revoke-all?token=${encodeURIComponent(token)}`, { method: 'POST' });
+  const res = await fetch(`${API_BASE_URL}/space/shares/revoke-all`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

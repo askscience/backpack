@@ -6,7 +6,9 @@
 <title>Backpack — Admin</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles/app.css">
-<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"
+  integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+  crossorigin="anonymous"></script>
 </head>
 <body x-data="adminApp()" x-init="init()">
   <div id="main-nav"></div>
@@ -37,7 +39,10 @@
               <tr>
                 <td>
                   <div style="font-weight:600" x-text="s.label"></div>
-                  <div class="mono-cell mono" x-text="s.id"></div>
+                  <div class="value-row" style="gap:4px;margin-top:2px">
+                    <code class="mono" x-text="truncate(s.owner_token || s.id, 16)" style="font-size:0.75rem"></code>
+                    <button class="copy-btn" @click="doCopy(s.owner_token || s.id)" title="Copy token" style="font-size:0.65rem;padding:0 4px">Copy</button>
+                  </div>
                 </td>
                 <td>
                   <div x-text="s.quota_bytes === 0 ? 'Unlimited' : formatBytes(s.used_bytes) + ' / ' + formatBytes(s.quota_bytes)"></div>
@@ -114,6 +119,30 @@
       <div class="modal-actions">
         <button class="btn btn-outline btn-full" @click="showCreateModal = false">Cancel</button>
         <button class="btn btn-primary btn-full" @click="doCreate" x-text="creating ? 'Creating…' : 'Create'"></button>
+      </div>
+    </div></div>
+  </template>
+
+  <!-- Created Result Modal -->
+  <template x-if="createdSpace">
+    <div class="modal-overlay" @click="createdSpace = null"><div class="modal" @click.stop>
+      <div class="modal-title">Space Created</div>
+      <p class="modal-text" x-text="`${createdSpace.label} is ready.`"></p>
+      <div class="info-grid">
+        <span class="label">Space ID</span>
+        <div class="value-row">
+          <code class="mono" x-text="createdSpace.space_id" style="word-break:break-all"></code>
+          <button class="copy-btn" @click="doCopy(createdSpace.space_id)" title="Copy">Copy</button>
+        </div>
+        <span class="label">Owner Token</span>
+        <div class="value-row">
+          <code class="mono" x-text="createdSpace.owner_token" style="word-break:break-all"></code>
+          <button class="copy-btn" @click="doCopy(createdSpace.owner_token)" title="Copy">Copy</button>
+        </div>
+      </div>
+      <p class="caption" style="margin-top:12px">Share the <strong>Owner Token</strong> with the user who will own this space. Keep it secret.</p>
+      <div class="modal-actions">
+        <button class="btn btn-outline btn-full" @click="createdSpace = null">Close</button>
       </div>
     </div></div>
   </template>
@@ -196,7 +225,11 @@
         <span class="label">Status:</span><span class="value" x-text="infoTarget.status"></span>
         <span class="label">Quota:</span><span class="value" x-text="infoTarget.quota_bytes === 0 ? 'Unlimited' : formatBytes(infoTarget.quota_bytes)"></span>
         <span class="label">Used:</span><span class="value" x-text="formatBytes(infoTarget.used_bytes || 0)"></span>
-        <span class="label">Owner:</span><span class="value mono" x-text="truncate(infoTarget.owner_token, 24)"></span>
+        <span class="label">Owner:</span>
+        <div class="value-row">
+          <code class="mono" x-text="truncate(infoTarget.owner_token, 24)" style="word-break:break-all"></code>
+          <button class="copy-btn" @click="doCopy(infoTarget.owner_token)" title="Copy full token">Copy</button>
+        </div>
         <span class="label">Created:</span><span class="value" x-text="formatDate(infoTarget.created_at)"></span>
       </div>
 
@@ -204,7 +237,13 @@
         <div class="sub-list-title">Shares</div>
         <template x-for="sh in infoTarget.shares" :key="sh.share_token">
           <div class="sub-list-item">
-            <div><div class="body-sm" x-text="sh.label"></div><div class="mono text-3" x-text="truncate(sh.share_token, 28)"></div></div>
+            <div>
+              <div class="body-sm" x-text="sh.label"></div>
+              <div class="value-row" style="gap:4px">
+                <code class="mono text-3" x-text="truncate(sh.share_token, 28)"></code>
+                <button class="copy-btn" @click="doCopy(sh.share_token)" title="Copy share token">Copy</button>
+              </div>
+            </div>
             <button class="table-btn danger" @click="revokeShare(infoTarget, sh.share_token)">Revoke</button>
           </div>
         </template>
@@ -233,6 +272,7 @@
       return {
         tab: 'spaces', subtitle: '', spaces: [], allShares: [], allArchives: [], loading: true,
         showCreateModal: false, createLabel: '', createQuota: 500, creating: false,
+        createdSpace: null,
         editTarget: null, editLabel: '', editQuota: '', editing: false,
         shareTarget: null, shareLabel: '', sharing: false,
         tokenTarget: null, regenerating: false,
@@ -262,8 +302,19 @@
         openCreate() { this.createLabel = ''; this.createQuota = 500; this.showCreateModal = true; },
         async doCreate() {
           if (!this.createLabel.trim()) return; this.creating = true;
-          try { await createAdminSpace(this.createLabel.trim(), Number(this.createQuota) || 0); toast('Space created'); this.showCreateModal = false; await this.loadAll(); }
+          try {
+            const result = await createAdminSpace(this.createLabel.trim(), Number(this.createQuota) || 0);
+            this.createdSpace = result;
+            this.showCreateModal = false;
+            await this.loadAll();
+          }
           catch (e) { toast(e.message, true); } finally { this.creating = false; }
+        },
+
+        async doCopy(text) {
+          if (!text) return;
+          await copyToClipboard(text);
+          toast('Copied to clipboard');
         },
 
         openEdit(space) { this.editTarget = space; this.editLabel = space.label; this.editQuota = space.quota_bytes > 0 ? Math.round(space.quota_bytes / (1024 * 1024)) : ''; },
@@ -319,5 +370,28 @@
       };
     }
   </script>
+  <style>
+    .copy-btn {
+      background: none;
+      border: 1px solid var(--border-color, #d1d5db);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      color: var(--text-secondary, #6b7280);
+      white-space: nowrap;
+      font-family: 'Inter', sans-serif;
+    }
+    .copy-btn:hover {
+      background: var(--bg-secondary, #e5e7eb);
+      color: var(--text-primary, #111827);
+      border-color: var(--text-secondary, #6b7280);
+    }
+    .value-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+  </style>
 </body>
 </html>

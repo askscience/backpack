@@ -106,11 +106,24 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Request body for `POST /api/admin/spaces` — create a new space.
 #[derive(Debug, serde::Deserialize)]
 pub struct CreateSpaceRequest {
-    /// Human-readable label for the space (e.g. "bob-project").
+    /// Human-readable label for the space (e.g. "bob-project"). Max 256 chars.
+    #[serde(default)]
     pub label: String,
     /// Quota in megabytes. `None` or `0` means unlimited.
     #[serde(default)]
     pub quota_mb: Option<u64>,
+}
+
+impl CreateSpaceRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.label.len() > 256 {
+            return Err("Label too long (max 256 characters)".into());
+        }
+        if self.label.trim().is_empty() {
+            return Err("Label cannot be empty".into());
+        }
+        Ok(())
+    }
 }
 
 /// Request body for `POST /api/admin/spaces/:id/share` — share a space.

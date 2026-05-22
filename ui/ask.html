@@ -6,7 +6,9 @@
 <title>Backpack — Ask</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles/app.css">
-<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"
+  integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+  crossorigin="anonymous"></script>
 </head>
 <body x-data="askApp()" x-init="init()">
   <div id="main-nav"></div>
@@ -34,7 +36,7 @@
                     <div class="sub-list-title">Sources</div>
                     <template x-for="src in msg.sources" :key="src.id">
                       <div class="chat-source">
-                        <a :href="getDownloadUrl(src.id)" target="_blank" x-text="src.original_name"></a>
+                        <a href="#" @click.prevent="triggerDownload(src.id, src.original_name)" target="_blank" x-text="src.original_name"></a>
                         <span class="text-3" x-text="` · ${formatBytes(src.file_size)}`"></span>
                       </div>
                     </template>

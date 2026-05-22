@@ -28,6 +28,9 @@ pub async fn create_space(
     State(state): State<AppState>,
     Json(body): Json<CreateSpaceRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Err(msg) = body.validate() {
+        return Err(ApiError::bad_request(msg));
+    }
     let quota_mb = body.quota_mb.unwrap_or(0);
 
     let created = state
@@ -151,6 +154,9 @@ pub async fn share_space(
     Path(space_id): Path<String>,
     Json(body): Json<ShareSpaceRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.label.len() > 256 {
+        return Err(ApiError::bad_request("Label too long (max 256 characters)"));
+    }
     let owner_token = state
         .spaces
         .find_owner_token(&space_id)

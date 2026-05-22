@@ -18,6 +18,14 @@ pub struct SpaceHandle {
     pub quota_bytes: u64,
     #[allow(dead_code)]
     pub iroh_ticket: Option<String>,
+    pub is_owner: bool,
+    pub can_write: bool,
+}
+
+impl SpaceHandle {
+    pub fn read_only(&self) -> bool {
+        !self.is_owner && !self.can_write
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -314,7 +322,7 @@ impl SpaceManager {
     }
 
     pub async fn delete(&self, token: &str, mode: DeleteMode) -> Result<DeleteResult> {
-        let info = self.find_space_by_token(token).await?;
+        let (info, _is_owner, _can_write) = self.find_space_by_token(token).await?;
         let space_id = info.space_id;
 
         match mode {
@@ -427,7 +435,7 @@ impl SpaceManager {
     }
 
     pub async fn info(&self, token: &str) -> Result<SpaceInfo> {
-        let si = self.find_space_by_token(token).await?;
+        let (si, _is_owner, _can_write) = self.find_space_by_token(token).await?;
 
         let share_rows = sqlx::query(
             "SELECT share_token, label, can_write FROM share_tokens WHERE space_id = ?1",
@@ -490,18 +498,10 @@ impl SpaceManager {
     pub async fn resolve(&self, token: Option<&str>) -> Result<SpaceHandle> {
         let token = match token {
             Some(t) if !t.is_empty() => t,
-            _ => {
-                return Ok(SpaceHandle {
-                    space_id: "default".into(),
-                    pool: self.default_pool.clone(),
-                    upload_dir: self.default_upload_dir.clone(),
-                    quota_bytes: 0,
-                    iroh_ticket: None,
-                });
-            }
+            _ => anyhow::bail!("Authentication required — provide a valid space token"),
         };
 
-        let si = self.find_space_by_token(token).await?;
+        let (si, is_owner, can_write) = self.find_space_by_token(token).await?;
 
         if si.status != "active" {
             anyhow::bail!("Space is not active (status: {})", si.status);
@@ -537,6 +537,8 @@ impl SpaceManager {
             upload_dir: si.upload_dir,
             quota_bytes: si.quota_bytes,
             iroh_ticket: None,
+            is_owner,
+            can_write,
         })
     }
 
@@ -545,7 +547,7 @@ impl SpaceManager {
     /// Used by the sync hub to gate real-time push — private spaces don't need
     /// WebSocket broadcast since only one user has access.
     pub async fn is_shared(&self, space_id: &str) -> Result<bool> {
-        if space_id == "default" || space_id.is_empty() {
+        if space_id.is_empty() {
             return Ok(false);
         }
         let row = sqlx::query(
@@ -841,12 +843,12 @@ impl SpaceManager {
         Ok(count)
     }
 
-    async fn find_space_by_token(&self, token: &str) -> Result<SpaceDbInfo> {
+    async fn find_space_by_token(&self, token: &str) -> Result<(SpaceDbInfo, bool, bool)> {
         let row = sqlx::query(
-            "SELECT id, db_path, upload_dir, quota_bytes, status FROM spaces
+            "SELECT id, db_path, upload_dir, quota_bytes, status, 1 as is_owner, 1 as can_write FROM spaces
              WHERE owner_token = ?1 AND status != 'deleted'
              UNION ALL
-             SELECT s.id, s.db_path, s.upload_dir, s.quota_bytes, s.status
+             SELECT s.id, s.db_path, s.upload_dir, s.quota_bytes, s.status, 0, st.can_write
              FROM share_tokens st JOIN spaces s ON st.space_id = s.id
              WHERE st.share_token = ?1 AND s.status != 'deleted'",
         )
@@ -854,12 +856,15 @@ impl SpaceManager {
         .fetch_optional(&self.registry)
         .await?;
 
-        row.map(|r| SpaceDbInfo {
-            space_id: r.get("id"),
-            db_path: r.get("db_path"),
-            upload_dir: r.get("upload_dir"),
-            quota_bytes: r.get::<i64, _>("quota_bytes") as u64,
-            status: r.get("status"),
+        row.map(|r| {
+            let can: i64 = r.get("can_write");
+            (SpaceDbInfo {
+                space_id: r.get("id"),
+                db_path: r.get("db_path"),
+                upload_dir: r.get("upload_dir"),
+                quota_bytes: r.get::<i64, _>("quota_bytes") as u64,
+                status: r.get("status"),
+            }, r.get::<i64, _>("is_owner") != 0, can != 0)
         })
         .ok_or_else(|| anyhow::anyhow!("Invalid or unknown space token"))
     }

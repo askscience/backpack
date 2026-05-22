@@ -10,6 +10,7 @@ mod iroh;
 mod spaces;
 mod sync;
 mod sync_hub;
+mod sync_server;
 mod vector;
 mod webauthn;
 
@@ -30,9 +31,8 @@ use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "iroh")]
 use tokio::net::TcpStream;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -490,20 +490,44 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .expect("Failed to initialize space manager");
     info!("Space manager initialized");
 
-    let webauthn_app = webauthn::WebauthnApp::new(
+    let webauthn_app = Arc::new(webauthn::WebauthnApp::new(
         &config.webauthn_rp_id,
         &config.webauthn_origin,
     )
-    .expect("Failed to init WebAuthn");
+    .expect("Failed to init WebAuthn"));
     webauthn::ensure_webauthn_schema(&default_pool)
         .await
         .expect("Failed to init WebAuthn schema");
 
+    sync_server::ensure_sync_schema(&default_pool)
+        .await
+        .expect("Failed to init sync schema");
+
+    // Clean up expired sessions on startup
+    let _ = webauthn::purge_expired_sessions(&default_pool).await;
+
+    // Background task: purge expired challenges every 5 minutes
+    let webauthn_bg = webauthn_app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            webauthn_bg.purge_expired_challenges();
+        }
+    });
+
+    // Background task: purge expired sessions every hour
+    let session_pool = default_pool.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            let _ = webauthn::purge_expired_sessions(&session_pool).await;
+        }
+    });
+
     if let Some(ref token) = config.admin_token {
         info!("Admin token: {}", token);
         info!("Use this token in the UI to register for admin access.");
-        let _ = std::fs::create_dir_all("data");
-        let _ = std::fs::write("data/admin-token.txt", format!("{}\n", token));
+        info!("Save this token now — it will not be shown again.");
     }
 
     let client = Client::builder()
@@ -519,13 +543,26 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         client,
         spaces: Arc::new(space_manager),
         sync_hub,
-        webauthn: Arc::new(webauthn_app),
+        webauthn: webauthn_app.clone(),
+        rate_limiter: Arc::new(handlers::RateLimiter::new()),
     };
 
     let max_bytes = config.max_file_size_mb * 1024 * 1024;
+    let allowed_origins = std::env::var("CORS_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000,http://localhost:8080".into());
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
+        .allow_origin(
+            allowed_origins
+                .split(',')
+                .map(|s| s.trim().parse::<axum::http::HeaderValue>().unwrap())
+                .collect::<Vec<_>>(),
+        )
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ])
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
@@ -577,22 +614,50 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .route("/space/shares", routing::get(handlers::list_space_shares)
             .post(handlers::create_space_share))
         .route("/space/shares/revoke-all", routing::post(handlers::revoke_all_space_shares))
-        .route("/api/webauthn/register/start", routing::post(handlers::webauthn_register_start))
-        .route("/api/webauthn/register/finish", routing::post(handlers::webauthn_register_finish))
-        .route("/api/webauthn/auth/start", routing::post(handlers::webauthn_auth_start))
-        .route("/api/webauthn/auth/finish", routing::post(handlers::webauthn_auth_finish))
-        .route("/api/webauthn/whoami", routing::get(handlers::webauthn_whoami))
+        .nest("/api/webauthn", {
+            let limiter = state.rate_limiter.clone();
+            Router::new()
+                .route("/register/start", routing::post(handlers::webauthn_register_start))
+                .route("/register/finish", routing::post(handlers::webauthn_register_finish))
+                .route("/auth/start", routing::post(handlers::webauthn_auth_start))
+                .route("/auth/finish", routing::post(handlers::webauthn_auth_finish))
+                .route("/whoami", routing::get(handlers::webauthn_whoami))
+                .route("/logout", routing::post(handlers::webauthn_logout))
+                .route_layer(axum::middleware::from_fn(move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+                    let limiter = limiter.clone();
+                    async move {
+                        let ip = req.headers()
+                            .get("x-forwarded-for")
+                            .and_then(|v| v.to_str().ok())
+                            .or_else(|| req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()))
+                            .unwrap_or("unknown");
+                        if !limiter.check(ip, 10) {
+                            return axum::response::Response::builder()
+                                .status(429)
+                                .body(axum::body::Body::from(r#"{"error":"Too many requests"}"#))
+                                .unwrap();
+                        }
+                        next.run(req).await
+                    }
+                }))
+        })
+        .route("/sync/config", routing::get(sync_server::get_sync_config)
+            .put(sync_server::update_sync_config))
+        .route("/sync/config/download", routing::get(sync_server::download_sync_config))
+        .route("/sync/status", routing::get(sync_server::get_sync_status)
+            .post(sync_server::report_sync_status))
+        .route("/sync/status/:path", routing::delete(sync_server::delete_sync_status))
+        .route("/sync/daemon", routing::get(sync_server::download_daemon))
         .route("/", routing::get(|| async {
             axum::Json(serde_json::json!({
                 "name": "AI Cloud Backpack",
-                "version": env!("CARGO_PKG_VERSION"),
                 "endpoints": {
-                    "upload": "POST /upload?token=<optional>",
-                    "search": "GET /search?token=<optional>&q=...",
-                    "ask": "POST /ask?token=<optional>",
-                    "inventory": "GET /inventory?token=<optional>",
-                    "download": "GET /download/{id}?token=<optional>",
-                    "delete": "DELETE /files/{id}?token=<optional>",
+                    "upload": "POST /upload (Authorization: Bearer <token>)",
+                    "search": "GET /search?q=... (Authorization: Bearer <token>)",
+                    "ask": "POST /ask (Authorization: Bearer <token>)",
+                    "inventory": "GET /inventory (Authorization: Bearer <token>)",
+                    "download": "GET /download/{id} (Authorization: Bearer <token>)",
+                    "delete": "DELETE /files/{id} (Authorization: Bearer <token>)",
                     "archive_download": "GET /archive/dl/{token}"
                 }
             }))
@@ -600,7 +665,6 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .nest("/api/admin", admin_routes)
         .layer(RequestBodyLimitLayer::new(max_bytes as usize))
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());

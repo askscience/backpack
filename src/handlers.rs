@@ -31,6 +31,7 @@ pub struct AppState {
     pub spaces: Arc<SpaceManager>,
     pub sync_hub: Arc<SyncHub>,
     pub webauthn: Arc<WebauthnApp>,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,13 +77,55 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         error!("{:?}", e);
-        ApiError::new(e.to_string())
+        ApiError::new("Internal server error")
+    }
+}
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Instant;
+
+pub struct RateLimiter {
+    windows: Mutex<HashMap<String, Vec<Instant>>>,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self { windows: Mutex::new(HashMap::new()) }
+    }
+
+    pub fn check(&self, key: &str, max_per_min: usize) -> bool {
+        let mut windows = self.windows.lock().unwrap();
+        let now = Instant::now();
+        let entries = windows.entry(key.to_string()).or_default();
+        entries.retain(|t| now.duration_since(*t).as_secs() < 60);
+        let allowed = entries.len() < max_per_min;
+        if allowed {
+            entries.push(now);
+        }
+        allowed
     }
 }
 
 #[derive(Deserialize)]
 pub struct TokenQuery {
     pub token: Option<String>,
+}
+
+pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+pub async fn resolve_space(state: &AppState, token: Option<String>) -> Result<SpaceHandle, ApiError> {
+    state
+        .spaces
+        .resolve(token.as_deref())
+        .await
+        .map_err(|e| ApiError::forbidden(format!("Invalid space token: {}", e)))
 }
 
 #[derive(Serialize)]
@@ -141,20 +184,17 @@ pub struct SourceInfo {
     pub summary: Option<String>,
 }
 
-async fn resolve_space(state: &AppState, token: Option<String>) -> Result<SpaceHandle, ApiError> {
-    state
-        .spaces
-        .resolve(token.as_deref())
-        .await
-        .map_err(|e| ApiError::forbidden(format!("Invalid space token: {}", e)))
-}
-
 pub async fn upload_handler(
     State(state): State<AppState>,
-    Query(TokenQuery { token }): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<BatchUploadResponse>, ApiError> {
+    let token = extract_bearer_token(&headers);
     let space = resolve_space(&state, token).await?;
+
+    if space.read_only() {
+        return Err(ApiError::forbidden("Read-only share token cannot upload files"));
+    }
 
     let mut files: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
 
@@ -166,6 +206,12 @@ pub async fn upload_handler(
         let name = field.name().unwrap_or("file").to_string();
         if name == "file" || name.is_empty() {
             let file_name = field.file_name().unwrap_or("unnamed").to_string();
+            if file_name.len() > 512 {
+                return Err(ApiError::bad_request(format!("Filename too long (max 512): {}", &file_name[..128.min(file_name.len())])));
+            }
+            if is_blocked_extension(&file_name) {
+                return Err(ApiError::forbidden(format!("File type not allowed: {}", file_name)));
+            }
             let content_type = field.content_type().map(|c| c.to_string());
             let data = field
                 .bytes()
@@ -398,9 +444,11 @@ fn sanitize_filename(name: &str) -> String {
 
 pub async fn search_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    let space = resolve_space(&state, query.token).await?;
+    let token = extract_bearer_token(&headers).or(query.token);
+    let space = resolve_space(&state, token).await?;
 
     if query.q.trim().is_empty() {
         return Ok(Json(SearchResponse {
@@ -425,8 +473,9 @@ pub async fn search_handler(
 
 pub async fn inventory_handler(
     State(state): State<AppState>,
-    Query(TokenQuery { token }): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<InventoryResponse>, ApiError> {
+    let token = extract_bearer_token(&headers);
     let space = resolve_space(&state, token).await?;
 
     let categories = db::list_files_grouped(&space.pool)
@@ -443,9 +492,12 @@ pub async fn inventory_handler(
 
 pub async fn download_handler(
     State(state): State<AppState>,
-    Query(TokenQuery { token }): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let token = extract_bearer_token(&headers)
+        .or_else(|| params.get("token").cloned());
     let space = resolve_space(&state, token).await?;
 
     let file = db::get_file(&space.pool, &id)
@@ -483,10 +535,15 @@ pub async fn download_handler(
 
 pub async fn delete_handler(
     State(state): State<AppState>,
-    Query(TokenQuery { token }): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = extract_bearer_token(&headers);
     let space = resolve_space(&state, token).await?;
+
+    if space.read_only() {
+        return Err(ApiError::forbidden("Read-only share token cannot delete files"));
+    }
 
     let file = db::get_file(&space.pool, &id)
         .await
@@ -509,7 +566,7 @@ pub async fn delete_handler(
         .await
         .map_err(|e| ApiError::new(format!("Failed to delete file record: {}", e)))?;
 
-    let _ = state.spaces.add_usage(&space.space_id, (-file_size as i64) as u64).await;
+    let _ = state.spaces.add_usage(&space.space_id, (file_size.max(0) as u64)).await;
 
     info!("Deleted file: id={}, name={}", id, file.original_name);
 
@@ -552,9 +609,10 @@ pub async fn delete_handler(
 
 pub async fn ask_handler(
     State(state): State<AppState>,
-    Query(TokenQuery { token }): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<AskRequest>,
 ) -> Result<Json<AskResponse>, ApiError> {
+    let token = extract_bearer_token(&headers);
     let space = resolve_space(&state, token).await?;
 
     if body.question.trim().is_empty() {
@@ -618,9 +676,11 @@ fn default_label() -> String {
 /// receive a `404 Not Found` since there's no team to sync with.
 pub async fn sync_token_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<SyncTokenQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let space = resolve_space(&state, query.token).await?;
+    let token = extract_bearer_token(&headers).or(query.token);
+    let space = resolve_space(&state, token).await?;
 
     let shared = state
         .spaces
@@ -899,7 +959,7 @@ pub async fn webauthn_register_finish(
     let user_id = {
         state.webauthn.challenges.lock().unwrap()
             .get(&body.challenge_id)
-            .map(|(_, uid)| uid.clone())
+            .map(|(_, uid, _)| uid.clone())
             .ok_or_else(|| ApiError::bad_request("Session lost — please try again"))?
     };
 
@@ -918,10 +978,18 @@ pub async fn webauthn_register_finish(
         .await
         .map_err(|e| ApiError::new(format!("Session failed: {}", e)))?;
 
+    // Resolve space token for non-admin users so the web UI can use it for API calls.
+    let space_token = if user_id != "admin" {
+        state.spaces.find_owner_token(&user_id).await.ok()
+    } else {
+        None
+    };
+
     Ok(Json(serde_json::json!({
         "session_token": session,
         "user_id": user_id,
         "role": role,
+        "space_token": space_token,
     })))
 }
 
@@ -948,29 +1016,36 @@ pub async fn webauthn_auth_finish(
         .finish_authentication(&body.challenge_id, &body.credential)
         .map_err(|e| ApiError::forbidden(format!("Auth failed: {}", e)))?;
 
-    let pool = &state.pool;
-    let user_id = webauthn::find_user_by_credential(pool, result.cred_id())
+    let user_id = webauthn::find_user_by_credential(&state.pool, result.cred_id())
         .await
         .map_err(|e| ApiError::new(format!("Lookup failed: {}", e)))?
-        .ok_or_else(|| ApiError::forbidden("Unknown credential"))?;
+        .unwrap_or_default();
 
     let role = if user_id == "admin" { "admin" } else { "user" };
-    let session = webauthn::create_session(pool, &user_id, role)
+    let session = webauthn::create_session(&state.pool, &user_id, role)
         .await
         .map_err(|e| ApiError::new(format!("Session failed: {}", e)))?;
+
+    // Resolve space token for non-admin users so the web UI can use it for API calls.
+    let space_token = if user_id != "admin" && !user_id.is_empty() {
+        state.spaces.find_owner_token(&user_id).await.ok()
+    } else {
+        None
+    };
 
     Ok(Json(serde_json::json!({
         "session_token": session,
         "user_id": user_id,
         "role": role,
+        "space_token": space_token,
     })))
 }
 
 pub async fn webauthn_whoami(
     State(state): State<AppState>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let session_token = params.get("session_token").cloned().unwrap_or_default();
+    let session_token = extract_bearer_token(&headers).unwrap_or_default();
     if session_token.is_empty() {
         return Err(ApiError::forbidden("No session"));
     }
@@ -984,6 +1059,23 @@ pub async fn webauthn_whoami(
         "user_id": session.0,
         "role": session.1,
     })))
+}
+
+/// `POST /api/webauthn/logout`
+///
+/// Invalidates the current WebAuthn session server-side.
+/// The session token is extracted from the `Authorization: Bearer` header.
+pub async fn webauthn_logout(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_token = extract_bearer_token(&headers).unwrap_or_default();
+    if !session_token.is_empty() {
+        webauthn::delete_session(&state.pool, &session_token)
+            .await
+            .map_err(|e| ApiError::new(format!("Logout failed: {}", e)))?;
+    }
+    Ok(Json(serde_json::json!({ "logged_out": true })))
 }
 
 async fn resolve_user_from_token(state: &AppState, token: &str) -> Result<String, ApiError> {
@@ -1011,13 +1103,16 @@ pub struct CreateShareRequest {
 
 pub async fn create_space_share(
     State(state): State<AppState>,
-    Query(params): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<CreateShareRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = params.token.as_deref().unwrap_or("");
+    if body.label.len() > 256 {
+        return Err(ApiError::bad_request("Label too long (max 256 characters)"));
+    }
+    let token = extract_bearer_token(&headers).unwrap_or_default();
     let share = state
         .spaces
-        .share(token, &body.label)
+        .share(&token, &body.label)
         .await
         .map_err(|e| ApiError::forbidden(format!("Share failed: {}", e)))?;
 
@@ -1026,12 +1121,12 @@ pub async fn create_space_share(
 
 pub async fn list_space_shares(
     State(state): State<AppState>,
-    Query(params): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = params.token.as_deref().unwrap_or("");
+    let token = extract_bearer_token(&headers).unwrap_or_default();
     let shares = state
         .spaces
-        .list_shares_for_owner(token)
+        .list_shares_for_owner(&token)
         .await
         .map_err(|e| ApiError::forbidden(format!("{}", e)))?;
 
@@ -1040,16 +1135,16 @@ pub async fn list_space_shares(
 
 pub async fn revoke_all_space_shares(
     State(state): State<AppState>,
-    Query(params): Query<TokenQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = params.token.as_deref().unwrap_or("");
+    let token = extract_bearer_token(&headers).unwrap_or_default();
     let count = state
         .spaces
-        .revoke_all_shares(token)
+        .revoke_all_shares(&token)
         .await
         .map_err(|e| ApiError::forbidden(format!("{}", e)))?;
 
-    if let Ok(space_id) = state.spaces.find_owner_token(token).await {
+    if let Ok(space_id) = state.spaces.find_owner_token(&token).await {
         state.sync_hub.broadcast_revoked(&space_id).await;
         state.sync_hub.revoke_space_tokens(&space_id).await;
     }
@@ -1058,4 +1153,14 @@ pub async fn revoke_all_space_shares(
         "revoked": true,
         "count": count,
     })))
+}
+
+fn is_blocked_extension(filename: &str) -> bool {
+    let blocked: &[&str] = &[".exe", ".dll", ".so", ".sh", ".bat", ".ps1", ".scr", ".msi", ".com", ".cmd", ".vbs", ".jar", ".app"];
+    let lower = filename.to_lowercase();
+    if let Some(dot) = lower.rfind('.') {
+        blocked.contains(&lower[dot..].as_ref())
+    } else {
+        false
+    }
 }

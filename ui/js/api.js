@@ -21,9 +21,18 @@ function setAdminToken(token) {
   localStorage.setItem('admin_token', token);
 }
 
+function setSessionToken(token) {
+  localStorage.setItem('session_token', token);
+}
+
+function getSessionToken() {
+  return localStorage.getItem('session_token') || '';
+}
+
 function clearTokens() {
   localStorage.removeItem('space_token');
   localStorage.removeItem('admin_token');
+  localStorage.removeItem('session_token');
 }
 
 function isAdmin() {
@@ -31,20 +40,21 @@ function isAdmin() {
 }
 
 async function apiRequest(path, options = {}) {
-  const { method = 'GET', body, isAdminReq = false, useTokenParam = true } = options;
-  let url = `${API_BASE_URL}${path}`;
+  const { method = 'GET', body, isAdminReq = false } = options;
+  const url = `${API_BASE_URL}${path}`;
 
   const headers = {};
-  let token = getToken();
 
   if (isAdminReq) {
     const adminToken = getAdminToken();
     if (adminToken) {
       headers['Authorization'] = `Bearer ${adminToken}`;
     }
-  } else if (token && useTokenParam) {
-    const sep = path.includes('?') ? '&' : '?';
-    url += `${sep}token=${encodeURIComponent(token)}`;
+  } else {
+    const token = getToken();
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
   }
 
   if (body && !(body instanceof FormData)) {
@@ -89,7 +99,7 @@ async function apiRequest(path, options = {}) {
 }
 
 async function getServerInfo() {
-  return apiRequest('/', { useTokenParam: false });
+  return apiRequest('/', { isAdminReq: false });
 }
 
 async function getInventory() {
@@ -101,13 +111,33 @@ async function uploadFiles(files) {
   for (const file of files) {
     fd.append('file', file);
   }
-  return apiRequest('/upload', { method: 'POST', body: fd, useTokenParam: true });
+  return apiRequest('/upload', { method: 'POST', body: fd });
 }
 
 function getDownloadUrl(fileId) {
-  const token = getToken();
-  const sep = '?';
-  return `${API_BASE_URL}/download/${fileId}${sep}token=${encodeURIComponent(token)}`;
+  return `${API_BASE_URL}/download/${fileId}`;
+}
+
+async function downloadFile(fileId, filename) {
+  const res = await fetch(getDownloadUrl(fileId), {
+    headers: { 'Authorization': `Bearer ${getToken()}` },
+  });
+  if (!res.ok) throw new Error('Download failed');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'download';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function triggerDownload(fileId, filename) {
+  downloadFile(fileId, filename).catch(function(e) {
+    toast('Download failed: ' + e.message, true);
+  });
 }
 
 async function deleteFile(fileId) {
@@ -198,4 +228,55 @@ async function deleteAdminShare(shareToken) {
 
 async function getAdminArchives() {
   return apiRequest('/api/admin/archives', { isAdminReq: true });
+}
+
+// ── Sync API ───────────────────────────────────────────────────────
+
+async function getSyncConfig() {
+  return apiRequest('/sync/config');
+}
+
+async function updateSyncConfig(data) {
+  return apiRequest('/sync/config', {
+    method: 'PUT',
+    body: data,
+  });
+}
+
+async function getSyncConfigDownloadUrl() {
+  return `${API_BASE_URL}/sync/config/download`;
+}
+
+async function downloadSyncConfig() {
+  const res = await fetch(getSyncConfigDownloadUrl(), {
+    headers: { 'Authorization': `Bearer ${getToken()}` },
+  });
+  if (!res.ok) throw new Error('Config download failed');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '.backpack-sync.toml';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function getSyncStatus() {
+  return apiRequest('/sync/status');
+}
+
+// ── Auth ────────────────────────────────────────────────────────────
+
+async function apiLogout() {
+  const session = getSessionToken();
+  if (session) {
+    try {
+      await fetch(`${API_BASE_URL}/api/webauthn/logout`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${session}` },
+      });
+    } catch (_) {}
+  }
 }

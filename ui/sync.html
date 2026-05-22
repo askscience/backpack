@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Backpack — Sync</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/app.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"
+  integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+  crossorigin="anonymous"></script>
+<script src="js/utils.js"></script>
+<script src="js/api.js"></script>
+<script src="js/components.js"></script>
+<script src="js/sync.js"></script>
+</head>
+<body x-data="syncApp()" x-init="init()">
+  <div id="main-nav"></div>
+
+  <div class="page">
+    <div class="page-header">
+      <div class="page-header-group">
+        <div class="page-title">Sync</div>
+        <div class="page-sub">Manage file synchronization between your devices and this space</div>
+      </div>
+    </div>
+
+    <div x-show="loading" x-transition>
+      <div class="loading"><div class="loading-spinner"></div></div>
+    </div>
+
+    <div x-show="!loading" x-transition>
+
+      <!-- Status Cards -->
+      <div class="stats-grid" style="margin-bottom: 24px;">
+        <div class="stat-card">
+          <div class="stat-value" x-text="status.total_tracked">0</div>
+          <div class="stat-label">Tracked</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value stat-green" x-text="status.synced">0</div>
+          <div class="stat-label">Synced</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value stat-yellow" x-text="status.pending">0</div>
+          <div class="stat-label">Pending</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value stat-red" x-text="status.conflicted">0</div>
+          <div class="stat-label">Conflicts</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value stat-gray" x-text="status.errors">0</div>
+          <div class="stat-label">Errors</div>
+        </div>
+      </div>
+
+      <!-- Config Panel -->
+      <div class="section collapsible" x-data="{ open: false }">
+        <div class="section-header" @click="open = !open">
+          <div class="section-title">Configuration</div>
+          <button class="btn btn-sm" x-text="open ? 'Hide' : 'Edit'"></button>
+        </div>
+        <div class="section-body" x-show="open" x-transition>
+          <div class="grid-form">
+            <div class="form-group">
+              <label class="form-label">Watch Directories</label>
+              <div class="tag-list" style="margin-bottom:8px">
+                <template x-for="(dir, idx) in config.watch_dirs" :key="dir">
+                  <div class="tag">
+                    <span x-text="dir"></span>
+                    <button class="tag-remove" @click="removeWatchDir(idx)">&times;</button>
+                  </div>
+                </template>
+              </div>
+              <div class="input-row">
+                <input type="text" class="input" placeholder="Add directory path..." x-model="watchDirInput" @keyup.enter="addWatchDir()">
+                <button class="btn btn-sm" @click="addWatchDir()">Add</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Ignore Patterns</label>
+              <div class="tag-list" style="margin-bottom:8px">
+                <template x-for="(pat, idx) in config.ignore_patterns" :key="pat">
+                  <div class="tag">
+                    <span x-text="pat"></span>
+                    <button class="tag-remove" @click="removeIgnorePattern(idx)">&times;</button>
+                  </div>
+                </template>
+              </div>
+              <div class="input-row">
+                <input type="text" class="input" placeholder="*.tmp" x-model="ignorePatternInput" @keyup.enter="addIgnorePattern()">
+                <button class="btn btn-sm" @click="addIgnorePattern()">Add</button>
+              </div>
+            </div>
+
+            <div class="form-group form-row">
+              <label class="form-label">
+                <span>Poll Interval</span>
+                <input type="number" class="input input-sm" x-model.number="config.poll_interval_secs" min="5" style="width:80px"> sec
+              </label>
+              <label class="form-label">
+                <span>Debounce</span>
+                <input type="number" class="input input-sm" x-model.number="config.debounce_ms" min="100" step="100" style="width:80px"> ms
+              </label>
+              <label class="form-label form-toggle">
+                <span>Enabled</span>
+                <input type="checkbox" x-model="config.enabled">
+              </label>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn btn-primary" @click="saveConfig()" :disabled="saving" x-text="saving ? 'Saving…' : 'Save Config'"></button>
+              <button class="btn" @click="downloadConfig()">Download .toml</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Events Feed -->
+      <div class="section collapsible" x-data="{ open: true }">
+        <div class="section-header" @click="open = !open">
+          <div class="section-title">
+            Live Feed
+            <span class="ws-dot" :class="wsStatus"></span>
+            <span class="page-sub" style="margin-left:8px" x-text="wsStatus === 'connected' ? 'Connected' : wsStatus === 'connecting' ? 'Connecting…' : 'Disconnected'"></span>
+          </div>
+          <button class="btn btn-sm" @click.stop="clearEvents()">Clear</button>
+        </div>
+        <div class="section-body" x-show="open" x-transition>
+          <div class="feed" style="max-height: 200px; overflow-y: auto;">
+            <div x-show="liveEvents.length === 0" class="empty-state">No events yet. Start the sync daemon to see activity.</div>
+            <template x-for="ev in liveEvents" :key="ev.time + ev.msg">
+              <div class="feed-item">
+                <span class="feed-time" x-text="ev.time"></span>
+                <span class="feed-msg" x-text="ev.msg"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sync Status Table -->
+      <div class="section">
+        <div class="section-header">
+          <div class="section-title">Tracked Files</div>
+          <div>
+            <select class="input input-sm" x-model="statusFilter" style="width:140px">
+              <option value="all">All</option>
+              <option value="synced">Synced</option>
+              <option value="pending_upload">Pending Upload</option>
+              <option value="pending_download">Pending Download</option>
+              <option value="conflicted">Conflicted</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+        </div>
+        <div class="section-body">
+          <div x-show="filteredEntries().length === 0" class="empty-state">
+            No tracked files. Install and run the sync daemon to start syncing.
+          </div>
+          <template x-if="filteredEntries().length > 0">
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>File</th>
+                    <th>Size</th>
+                    <th>Status</th>
+                    <th>Last Synced</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="entry in filteredEntries()" :key="entry.relative_path">
+                    <tr>
+                      <td class="mono" x-text="entry.relative_path"></td>
+                      <td x-text="formatBytes(entry.file_size)"></td>
+                      <td x-html="statusBadge(entry.sync_status)"></td>
+                      <td x-text="timeAgo(entry.last_synced_at)"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .ws-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin: 0 6px; vertical-align: middle; }
+    .ws-dot.connected { background: var(--green, #22c55e); }
+    .ws-dot.connecting { background: var(--yellow, #eab308); animation: pulse 1s infinite; }
+    .ws-dot.disconnected { background: var(--red, #ef4444); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; background: var(--bg-secondary, #e5e7eb); font-size: 0.85rem; }
+    .tag-remove { background: none; border: none; cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 2px; color: var(--text-secondary, #6b7280); }
+    .tag-remove:hover { color: var(--red, #ef4444); }
+    .input-row { display: flex; gap: 8px; align-items: center; }
+    .input-sm { width: 80px; padding: 4px 8px; }
+    .form-toggle { display: flex; align-items: center; gap: 8px; }
+    .btn-row { display: flex; gap: 8px; }
+    .feed { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+    .feed-item { padding: 4px 0; border-bottom: 1px solid var(--border-color, #e5e7eb); display: flex; gap: 12px; }
+    .feed-time { color: var(--text-secondary, #6b7280); white-space: nowrap; }
+    .feed-msg { color: var(--text-primary, #111827); }
+    .mono { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; }
+    .table-wrap { overflow-x: auto; }
+  </style>
+</body>
+</html>

@@ -6,7 +6,9 @@
 <title>Backpack — Dashboard</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles/app.css">
-<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"
+  integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+  crossorigin="anonymous"></script>
 </head>
 <body x-data="dashboardApp()" x-init="init()">
   <div id="main-nav"></div>
@@ -47,7 +49,7 @@
               </div>
             </div>
             <div class="file-actions">
-              <a :href="getDownloadUrl(file.id)" class="table-btn">Download</a>
+              <a href="#" @click.prevent="triggerDownload(file.id, file.original_name)" class="table-btn">Download</a>
             </div>
           </div>
         </template>

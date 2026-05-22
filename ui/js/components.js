@@ -21,7 +21,8 @@ function initTheme() {
   setTheme(theme);
 }
 
-function logout() {
+async function logout() {
+  await apiLogout();
   clearTokens();
   window.location.href = 'index.html';
 }
@@ -47,6 +48,7 @@ function renderNav(currentPage) {
       { id: 'search', label: 'Search', href: 'search.html' },
       { id: 'ask', label: 'Ask', href: 'ask.html' },
       { id: 'shares', label: 'Shares', href: 'shares.html' },
+      { id: 'sync', label: 'Sync', href: 'sync.html' },
     ];
     for (const p of spacePages) {
       const active = p.id === currentPage;

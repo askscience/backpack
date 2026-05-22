@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use super::client::SyncClient;
@@ -14,30 +16,35 @@ use super::ws;
 /// Core sync engine that orchestrates bi-directional file synchronization
 /// between a local watch directory and a backpack server.
 pub struct SyncEngine {
-    config: SyncConfig,
+    config: RwLock<SyncConfig>,
     client: SyncClient,
     state: SyncState,
 }
 
 impl SyncEngine {
     pub fn new(config: SyncConfig, client: SyncClient, state: SyncState) -> Self {
-        Self { config, client, state }
+        Self { config: RwLock::new(config), client, state }
+    }
+
+    fn conf(&self) -> tokio::sync::RwLockReadGuard<'_, SyncConfig> {
+        self.config.blocking_read()
     }
 
     pub async fn run(self: std::sync::Arc<Self>) -> Result<()> {
         let mut event_rx = {
+            let cfg = self.conf();
             let watcher = FileWatcher::new(
-                self.config.debounce_ms, self.config.ignore_patterns.clone(),
+                cfg.debounce_ms, cfg.ignore_patterns.clone(),
             );
-            let (rx, _handle) = watcher.start(Path::new(&self.config.watch_dir)).await
+            let (rx, _handle) = watcher.start(Path::new(&cfg.watch_dir)).await
                 .context("Failed to start file watcher")?;
             rx
         };
 
-        info!("Performing initial scan of {}", self.config.watch_dir);
+        info!("Performing initial scan of {}", self.conf().watch_dir);
         let _ = self.scan_local_changes().await;
 
-        let poll_interval = std::time::Duration::from_secs(self.config.poll_interval_secs);
+        let poll_interval = std::time::Duration::from_secs(self.conf().poll_interval_secs);
         let watch_engine = self.clone();
         let poll_engine = self.clone();
 
@@ -61,10 +68,21 @@ impl SyncEngine {
             }
         });
 
+        let config_poll_engine = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Err(e) = config_poll_engine.poll_server_config().await {
+                    warn!("Config poll failed: {}", e);
+                }
+            }
+        });
+
         tokio::spawn({
             let ws_engine = self.clone();
-            let server_url = self.config.server_url.clone();
-            let space_token = self.config.space_token.clone();
+            let server_url = self.conf().server_url.clone();
+            let space_token = self.conf().space_token.clone();
             async move {
                 if let Some(ref token) = space_token {
                     match ws::connect(&server_url, token).await {
@@ -126,7 +144,7 @@ impl SyncEngine {
         }
 
         info!("WS: downloading new file: {} ({})", event.original_name, event.file_id);
-        let dest_path = Path::new(&self.config.watch_dir).join(&event.original_name);
+        let dest_path = Path::new(&self.conf().watch_dir).join(&event.original_name);
 
         if let Err(e) = self.client.download_file(&event.file_id, &dest_path).await {
             error!("WS: download failed for {}: {}", event.file_id, e);
@@ -151,7 +169,8 @@ impl SyncEngine {
     }
 
     pub async fn scan_local_changes(&self) -> Result<()> {
-        let watch_dir = Path::new(&self.config.watch_dir);
+        let cfg = self.conf();
+        let watch_dir = Path::new(&cfg.watch_dir);
         self.scan_dir_recursive(watch_dir, watch_dir).await
     }
 
@@ -160,7 +179,7 @@ impl SyncEngine {
             .with_context(|| format!("Failed to read dir {}", current.display()))?;
         while let Some(entry) = read_dir.next_entry().await? {
             let path = entry.path();
-            if watcher::should_ignore(&path, root, &self.config.ignore_patterns) { continue; }
+            if watcher::should_ignore(&path, root, &self.conf().ignore_patterns) { continue; }
             if entry.file_type().await?.is_dir() {
                 Box::pin(self.scan_dir_recursive(root, &path)).await?;
             } else if let Err(e) = self.upload_if_changed(&path, root).await {
@@ -171,7 +190,8 @@ impl SyncEngine {
     }
 
     async fn handle_local_event(&self, event: SyncEvent) -> Result<()> {
-        let root = Path::new(&self.config.watch_dir);
+        let cfg = self.conf();
+        let root = Path::new(&cfg.watch_dir);
         match event {
             SyncEvent::Changed(path) => {
                 if !path.exists() { return Ok(()); }
@@ -215,6 +235,7 @@ impl SyncEngine {
         };
         self.state.upsert(&entry).await?;
         info!("Synced locally: {} -> remote id {}", upload_resp.original_name, upload_resp.id);
+        let _ = self.report_status_to_server().await;
         Ok(())
     }
 
@@ -230,6 +251,7 @@ impl SyncEngine {
             self.state.delete_by_path(&relative).await?;
             info!("Untracked locally deleted file: {}", relative);
         }
+        let _ = self.report_status_to_server().await;
         Ok(())
     }
 
@@ -283,7 +305,7 @@ impl SyncEngine {
         for local in &local_entries {
             if let Some(ref remote_id) = local.remote_file_id {
                 if !remote_by_id.contains_key(remote_id) {
-                    let full_path = Path::new(&self.config.watch_dir).join(&local.relative_path);
+                    let full_path = Path::new(&self.conf().watch_dir).join(&local.relative_path);
                     info!("Remote file {} deleted — removing local: {}", remote_id, local.relative_path);
                     if full_path.exists() {
                         if let Err(e) = tokio::fs::remove_file(&full_path).await {
@@ -299,7 +321,7 @@ impl SyncEngine {
 
     async fn download_and_track(&self, remote: &RemoteFileEntry) -> Result<()> {
         let relative = remote.original_name.clone();
-        let dest_path = Path::new(&self.config.watch_dir).join(&relative);
+        let dest_path = Path::new(&self.conf().watch_dir).join(&relative);
         self.client.download_file(&remote.id, &dest_path).await?;
         let hash = sha256_file(&dest_path).await?;
         let size = tokio::fs::metadata(&dest_path).await.map(|m| m.len() as i64).unwrap_or(remote.file_size);
@@ -313,11 +335,12 @@ impl SyncEngine {
         };
         self.state.upsert(&entry).await?;
         info!("Downloaded: {} -> {}", remote.original_name, dest_path.display());
+        let _ = self.report_status_to_server().await;
         Ok(())
     }
 
     async fn resolve_conflict(&self, local: &SyncEntry, remote: &RemoteFileEntry) -> Result<()> {
-        let full_path = Path::new(&self.config.watch_dir).join(&local.relative_path);
+        let full_path = Path::new(&self.conf().watch_dir).join(&local.relative_path);
         if full_path.exists() {
             let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
             let stem = full_path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
@@ -332,8 +355,77 @@ impl SyncEngine {
     }
 
     async fn hash_local_file(&self, relative_path: &str) -> Result<String> {
-        let full_path = Path::new(&self.config.watch_dir).join(relative_path);
+        let full_path = Path::new(&self.conf().watch_dir).join(relative_path);
         sha256_file(&full_path).await
+    }
+
+    /// Report all locally tracked file statuses to the server.
+    async fn report_status_to_server(&self) -> Result<()> {
+        if self.conf().space_token.is_none() {
+            return Ok(());
+        }
+        let entries = self.state.list_all().await?;
+        let reports: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| json!({
+                "relative_path": e.relative_path,
+                "content_hash": e.content_hash,
+                "file_size": e.file_size,
+                "remote_file_id": e.remote_file_id,
+                "sync_status": e.sync_status,
+                "last_modified": e.last_local_modified,
+            }))
+            .collect();
+        if let Err(e) = self.client.report_sync_status(&reports).await {
+            warn!("Failed to report sync status: {}", e);
+        }
+        Ok(())
+    }
+
+    /// Poll the server for updated sync configuration and apply hot-reload.
+    async fn poll_server_config(&self) -> Result<()> {
+        if self.conf().space_token.is_none() {
+            return Ok(());
+        }
+        match self.client.get_sync_config().await {
+            Ok(val) => {
+                if let Some(dirs) = val.get("watch_dirs").and_then(|v| v.as_array()) {
+                    if let Some(first_dir) = dirs.first().and_then(|v| v.as_str()) {
+                        let mut cfg = self.config.write().await;
+                        if first_dir != cfg.watch_dir {
+                            info!("Config hot-reload: watch_dir updated to {}", first_dir);
+                            cfg.watch_dir = first_dir.to_string();
+                        }
+                    }
+                }
+                if let Some(patterns) = val.get("ignore_patterns").and_then(|v| v.as_array()) {
+                    let pats: Vec<String> = patterns.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                    let mut cfg = self.config.write().await;
+                    if pats != cfg.ignore_patterns {
+                        info!("Config hot-reload: ignore_patterns updated");
+                        cfg.ignore_patterns = pats;
+                    }
+                }
+                if let Some(poll) = val.get("poll_interval_secs").and_then(|v| v.as_u64()) {
+                    let mut cfg = self.config.write().await;
+                    if poll != cfg.poll_interval_secs {
+                        info!("Config hot-reload: poll_interval_secs {} -> {}", cfg.poll_interval_secs, poll);
+                        cfg.poll_interval_secs = poll;
+                    }
+                }
+                if let Some(deb) = val.get("debounce_ms").and_then(|v| v.as_u64()) {
+                    let mut cfg = self.config.write().await;
+                    if deb != cfg.debounce_ms {
+                        info!("Config hot-reload: debounce_ms {} -> {}", cfg.debounce_ms, deb);
+                        cfg.debounce_ms = deb;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Config poll failed: {}", e);
+            }
+        }
+        Ok(())
     }
 }
 

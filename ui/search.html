@@ -6,7 +6,9 @@
 <title>Backpack — Search</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles/app.css">
-<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"
+  integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+  crossorigin="anonymous"></script>
 </head>
 <body x-data="searchApp()" x-init="init()">
   <div id="main-nav"></div>
@@ -33,7 +35,7 @@
       </div>
       <template x-for="r in results" :key="r.id">
         <div class="search-result">
-          <div class="search-result-title"><a :href="getDownloadUrl(r.id)" x-text="r.original_name"></a></div>
+          <div class="search-result-title"><a href="#" @click.prevent="triggerDownload(r.id, r.original_name)" x-text="r.original_name"></a></div>
           <div class="search-result-meta">
             <span x-text="formatBytes(r.file_size)"></span>
             <span x-show="r.category"> · </span>
