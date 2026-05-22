@@ -29,28 +29,33 @@
 
     <div id="loading-state"></div>
 
+    <!-- AI Gimmick Card -->
+    <div class="ai-note-card" x-show="!loading && aiNote">
+      <div class="ai-note-label">AI Overview</div>
+      <div class="ai-note-text">
+        "<span x-text="aiNote.summary"></span>"
+        <br>
+        — <strong x-text="aiNote.title"></strong>
+      </div>
+    </div>
+
     <div class="section" x-show="!loading && files.length > 0">
       <div class="section-head">
         <div class="section-title">Recent files</div>
         <a href="files.html" class="btn btn-ghost btn-sm">View all →</a>
       </div>
-      <div class="file-list">
+      <div class="mini-card-list">
         <template x-for="file in files" :key="file.id">
-          <div class="file-item">
-            <img class="file-icon-svg" :src="fileIconPath(file.mime)" alt="">
-            <div class="file-info">
-              <div class="file-name" x-text="file.original_name"></div>
-              <div class="file-meta">
-                <span x-text="formatBytes(file.file_size)"></span>
-                <span x-show="file.category"> · </span>
-                <span x-text="file.category"></span>
-                <span> · </span>
-                <span x-text="timeAgo(file.created_at)"></span>
-              </div>
+          <div class="mini-card" @click="goToFile(file)">
+            <div class="mini-card-icon">
+              <img x-show="isImage(file.mime)" :src="getInlineUrl(file.id)" alt="" style="object-fit:cover;width:28px;height:28px;border-radius:0;opacity:1">
+              <img x-show="!isImage(file.mime)" :src="fileIconPath(file.mime)" alt="">
             </div>
-            <div class="file-actions">
-              <a href="#" @click.prevent="triggerDownload(file.id, file.original_name)" class="table-btn">Download</a>
+            <div class="mini-card-body">
+              <div class="mini-card-title" x-text="file.title || file.original_name"></div>
+              <div class="mini-card-summary" x-text="file.summary || file.category || ''"></div>
             </div>
+            <div class="mini-card-time" x-text="timeAgo(file.created_at)"></div>
           </div>
         </template>
       </div>
@@ -69,6 +74,7 @@
     function dashboardApp() {
       return {
         name: '', subtitle: '', totalFiles: 0, totalCategories: 0, totalSize: '0 B', files: [], loading: true,
+        aiNote: null,
         async init() {
           initTheme(); renderNav('dashboard');
           if (!getToken()) { window.location.href = 'index.html'; return; }
@@ -83,9 +89,17 @@
               for (const cat of inv.categories) for (const f of (cat.files || [])) all.push(f);
               all.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
               this.files = all.slice(0, 10);
+
+              const withSummary = all.filter(f => f.summary);
+              if (withSummary.length > 0) {
+                this.aiNote = withSummary[Math.floor(Math.random() * withSummary.length)];
+              }
             }
           } catch (e) { showError('loading-state', e.message); }
           finally { this.loading = false; }
+        },
+        goToFile(file) {
+          window.location.href = `files.html${file.category ? '?filter=' + encodeURIComponent(file.category) : ''}`;
         }
       };
     }

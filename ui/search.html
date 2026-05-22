@@ -33,17 +33,29 @@
       <div class="section-head">
         <div class="section-title" x-text="`${results.length} result${results.length !== 1 ? 's' : ''}`"></div>
       </div>
-      <template x-for="r in results" :key="r.id">
-        <div class="search-result">
-          <div class="search-result-title"><a href="#" @click.prevent="triggerDownload(r.id, r.original_name)" x-text="r.original_name"></a></div>
-          <div class="search-result-meta">
-            <span x-text="formatBytes(r.file_size)"></span>
-            <span x-show="r.category"> · </span>
-            <span class="tag" x-text="r.category"></span>
+      <div class="file-list">
+        <template x-for="r in results" :key="r.id">
+          <div class="search-result-card" @click="openLightbox(r)">
+            <div class="search-result-thumb" :class="{ 'gradient': !isImage(r.mime) }">
+              <img x-show="isImage(r.mime)" class="img-preview" :src="getInlineUrl(r.id)" alt="">
+              <img x-show="!isImage(r.mime)" :src="fileIconPath(r.mime)" alt="">
+            </div>
+            <div class="search-result-info">
+              <div class="sr-title" x-text="r.title || r.original_name"></div>
+              <div class="sr-summary" x-show="r.summary" x-text="r.summary"></div>
+              <div class="sr-tags" x-show="r.tags">
+                <template x-for="tag in r.tags.split(',').slice(0, 3)" :key="tag">
+                  <span class="sr-tag" x-text="tag.trim()"></span>
+                </template>
+              </div>
+            </div>
+            <div class="search-result-bar">
+              <div class="bar-label" x-text="Math.round((r.similarity || r.score || 0) * 100) + '%'"></div>
+              <div class="similarity-bar"><div class="similarity-fill" :style="`width: ${Math.round((r.similarity || r.score || 0) * 100)}%`"></div></div>
+            </div>
           </div>
-          <div class="similarity-bar"><div class="similarity-fill" :style="`width: ${Math.round((r.similarity || 0) * 100)}%`"></div></div>
-        </div>
-      </template>
+        </template>
+      </div>
     </div>
 
     <div class="empty-state" x-show="searched && results.length === 0 && !searching">
@@ -55,6 +67,40 @@
     </div>
   </div>
 
+  <!-- Lightbox (reuse same pattern) -->
+  <template x-if="lightboxFile">
+    <div class="lightbox-overlay" @click="closeLightbox()" @keydown.escape.window="closeLightbox()">
+      <div class="lightbox-inner" @click.stop>
+        <div class="lightbox-image-area">
+          <img x-show="isImage(lightboxFile.mime)" :src="getInlineUrl(lightboxFile.id)" :alt="lightboxFile.original_name">
+          <div x-show="!isImage(lightboxFile.mime)" class="card-icon-wrapper" :style="`background: ${cardGradient(lightboxFile.mime)}; aspect-ratio:auto; width:120px; height:120px; border-radius:0;`">
+            <img class="lb-icon-large" :src="fileIconPath(lightboxFile.mime)" alt="">
+          </div>
+          <button class="lightbox-close" @click="closeLightbox()">✕</button>
+        </div>
+        <div class="lightbox-sidebar">
+          <div class="lb-title" x-text="lightboxFile.title || fileNameWithoutExt(lightboxFile.original_name)"></div>
+          <div class="lb-summary" x-show="lightboxFile.summary" x-text="lightboxFile.summary"></div>
+          <div class="lb-tags" x-show="lightboxFile.tags">
+            <template x-for="tag in lightboxFile.tags.split(',')" :key="tag">
+              <span class="lb-tag" x-text="tag.trim()"></span>
+            </template>
+          </div>
+          <div class="lb-meta">
+            <span class="lb-label">Name</span><span class="lb-value" x-text="lightboxFile.original_name"></span>
+            <span class="lb-label">Size</span><span class="lb-value" x-text="formatBytes(lightboxFile.file_size)"></span>
+            <span class="lb-label">Type</span><span class="lb-value mono" x-text="lightboxFile.mime"></span>
+            <span class="lb-label">Category</span><span class="lb-value" x-text="lightboxFile.category || '—'"></span>
+            <span class="lb-label">Added</span><span class="lb-value" x-text="formatDate(lightboxFile.created_at)"></span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:auto;padding-top:16px;border-top:1px solid var(--border)">
+            <button class="btn btn-primary btn-sm btn-full" @click="triggerDownload(lightboxFile.id, lightboxFile.original_name)">Download</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
   <script src="js/api.js"></script>
   <script src="js/utils.js"></script>
   <script src="js/components.js"></script>
@@ -62,6 +108,7 @@
     function searchApp() {
       return {
         query: '', results: [], searching: false, searched: false, lastQuery: '', debounceTimer: null,
+        lightboxFile: null,
         init() {
           initTheme(); renderNav('search');
           if (!getToken()) { window.location.href = 'index.html'; return; }
@@ -78,7 +125,9 @@
           try { const res = await searchFiles(q); this.results = res.results || []; this.searched = true; }
           catch (e) { showError('loading-state', e.message); }
           finally { this.searching = false; }
-        }
+        },
+        openLightbox(file) { this.lightboxFile = file; },
+        closeLightbox() { this.lightboxFile = null; }
       };
     }
   </script>

@@ -151,6 +151,7 @@ pub struct BatchUploadResponse {
 #[derive(Serialize)]
 pub struct InventoryResponse {
     pub total_files: usize,
+    pub total_size: i64,
     pub categories: Vec<db::CategoryGroup>,
 }
 
@@ -180,6 +181,9 @@ pub struct AskResponse {
 #[derive(Serialize)]
 pub struct SourceInfo {
     pub id: String,
+    pub original_name: String,
+    pub mime: String,
+    pub file_size: i64,
     pub title: Option<String>,
     pub summary: Option<String>,
 }
@@ -483,9 +487,11 @@ pub async fn inventory_handler(
         .map_err(|e| ApiError::new(format!("Failed to list files: {}", e)))?;
 
     let total_files: usize = categories.iter().map(|g| g.count).sum();
+    let total_size: i64 = categories.iter().flat_map(|g| g.files.iter()).map(|f| f.file_size).sum();
 
     Ok(Json(InventoryResponse {
         total_files,
+        total_size,
         categories,
     }))
 }
@@ -531,6 +537,39 @@ pub async fn download_handler(
         Ok::<_, ApiError>((headers, data))
     }
     .await
+}
+
+pub async fn inline_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let token = extract_bearer_token(&headers);
+    let space = resolve_space(&state, token).await?;
+
+    let file = db::get_file(&space.pool, &id)
+        .await
+        .map_err(|e| ApiError::new(format!("DB error: {}", e)))?
+        .ok_or_else(|| ApiError::not_found("File not found"))?;
+
+    if !std::path::Path::new(&file.file_path).exists() {
+        return Err(ApiError::not_found("File not found on disk"));
+    }
+
+    let data = tokio::fs::read(&file.file_path)
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to read file: {}", e)))?;
+
+    let mime_str = file.mime.clone();
+    let headers = [
+        (header::CONTENT_TYPE, mime_str),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}\"", file.original_name),
+        ),
+    ];
+
+    Ok::<_, ApiError>((headers, data))
 }
 
 pub async fn delete_handler(
@@ -630,6 +669,9 @@ pub async fn ask_handler(
         .iter()
         .map(|r| SourceInfo {
             id: r.id.clone(),
+            original_name: r.original_name.clone(),
+            mime: r.mime.clone(),
+            file_size: r.file_size,
             title: r.title.clone(),
             summary: r.summary.clone(),
         })

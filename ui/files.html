@@ -38,32 +38,82 @@
 
     <div id="loading-state"></div>
 
-    <template x-for="(category, idx) in categories" :key="category.name">
-      <div class="category-group" x-show="!loading">
-        <div class="category-header" @click="category.open = !category.open">
-          <div class="flex-center" style="gap:8px">
-            <span class="category-label" x-text="category.name || 'Uncategorized'"></span>
-            <span class="category-count" x-text="`(${category.files ? category.files.length : 0})`"></span>
+    <template x-if="!loading">
+      <div>
+        <div class="file-controls">
+          <div class="filter-pills">
+            <button class="filter-pill" :class="{ active: activeFilter === 'all' }" @click="activeFilter = 'all'">All</button>
+            <template x-for="cat in allCategories" :key="cat">
+              <button class="filter-pill" :class="{ active: activeFilter === cat }" @click="activeFilter = cat" x-text="cat"></button>
+            </template>
           </div>
-          <span class="category-toggle" x-text="category.open ? '−' : '+'"></span>
+          <div class="view-toggle">
+            <button :class="{ active: viewMode === 'grid' }" @click="setView('grid')">[Grid]</button>
+            <button :class="{ active: viewMode === 'list' }" @click="setView('list')">[List]</button>
+          </div>
         </div>
-        <div class="category-body" x-show="category.open" x-transition>
-          <template x-for="file in (category.files || [])" :key="file.id">
-            <div class="file-item">
-              <img class="file-icon-svg" :src="fileIconPath(file.mime)" alt="">
-              <div class="file-info">
-                <div class="file-name" x-text="file.original_name"></div>
-                <div class="file-meta">
+
+        <div x-show="viewMode === 'grid'" class="file-grid">
+          <template x-for="(file, idx) in filteredFiles" :key="file.id">
+            <div class="file-card" @click="openLightbox(file)" :style="`animation-delay: ${(idx % 20) * 0.04}s`">
+              <div x-show="isImage(file.mime)" class="card-image-wrapper">
+                <img :src="getInlineUrl(file.id)" :alt="file.title || file.original_name" loading="lazy">
+              </div>
+              <div x-show="!isImage(file.mime)" class="card-icon-wrapper" :style="`background: ${cardGradient(file.mime)}`">
+                <img :src="fileIconPath(file.mime)" alt="">
+              </div>
+              <div class="card-body">
+                <div class="card-title" x-text="file.title || fileNameWithoutExt(file.original_name)"></div>
+                <div class="card-summary" x-text="file.summary ? truncate(file.summary, 120) : ''"></div>
+                <div class="card-tags" x-show="file.tags">
+                  <template x-for="tag in file.tags.split(',').slice(0, 3)" :key="tag">
+                    <span class="card-tag" x-text="tag.trim()"></span>
+                  </template>
+                </div>
+                <div class="card-meta">
                   <span x-text="formatBytes(file.file_size)"></span>
-                  <span> · </span>
+                  <span>·</span>
                   <span x-text="timeAgo(file.created_at)"></span>
-                  <span x-show="file.title"> · </span>
-                  <span x-text="file.title"></span>
                 </div>
               </div>
-              <div class="file-actions">
-                <a href="#" @click.prevent="triggerDownload(file.id, file.original_name)" class="table-btn">Download</a>
-                <button class="table-btn danger" @click="confirmDelete(file)">Delete</button>
+              <div class="card-actions" @click.stop>
+                <button class="card-action-btn" @click="triggerDownload(file.id, file.original_name)">Download</button>
+                <button class="card-action-btn danger" @click="confirmDelete(file)">Delete</button>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <div x-show="viewMode === 'list'">
+          <template x-for="category in filteredCategories" :key="category.name">
+            <div class="category-group">
+              <div class="category-header" @click="category.open = !category.open">
+                <div class="flex-center" style="gap:8px">
+                  <span class="category-label" x-text="category.name || 'Uncategorized'"></span>
+                  <span class="category-count" x-text="`(${category.files ? category.files.length : 0})`"></span>
+                </div>
+                <span class="category-toggle" x-text="category.open ? '−' : '+'"></span>
+              </div>
+              <div class="category-body" x-show="category.open" x-transition>
+                <template x-for="file in (category.files || [])" :key="file.id">
+                  <div class="file-item" @click="openLightbox(file)">
+                    <img class="file-icon-svg" :src="fileIconPath(file.mime)" alt="">
+                    <div class="file-info">
+                      <div class="file-name" x-text="file.original_name"></div>
+                      <div class="file-meta">
+                        <span x-text="formatBytes(file.file_size)"></span>
+                        <span> · </span>
+                        <span x-text="timeAgo(file.created_at)"></span>
+                        <span x-show="file.title"> · </span>
+                        <span x-text="file.title"></span>
+                      </div>
+                    </div>
+                    <div class="file-actions" @click.stop>
+                      <a href="#" @click.prevent="triggerDownload(file.id, file.original_name)" class="table-btn">Download</a>
+                      <button class="table-btn danger" @click="confirmDelete(file)">Delete</button>
+                    </div>
+                  </div>
+                </template>
               </div>
             </div>
           </template>
@@ -71,9 +121,45 @@
       </div>
     </template>
 
-    <div class="empty-state" x-show="!loading && categories.length === 0"><p>No files yet.</p></div>
+    <div class="empty-state" x-show="!loading && filteredFiles.length === 0"><p>No files in this category.</p></div>
   </div>
 
+  <!-- Lightbox -->
+  <template x-if="lightboxFile">
+    <div class="lightbox-overlay" @click="closeLightbox()" @keydown.escape.window="closeLightbox()">
+      <div class="lightbox-inner" @click.stop>
+        <div class="lightbox-image-area">
+          <img x-show="isImage(lightboxFile.mime)" :src="getInlineUrl(lightboxFile.id)" :alt="lightboxFile.original_name">
+          <div x-show="!isImage(lightboxFile.mime)" class="card-icon-wrapper" :style="`background: ${cardGradient(lightboxFile.mime)}; aspect-ratio:auto; width:120px; height:120px; border-radius:0;`">
+            <img class="lb-icon-large" :src="fileIconPath(lightboxFile.mime)" alt="">
+          </div>
+          <button class="lightbox-close" @click="closeLightbox()">✕</button>
+        </div>
+        <div class="lightbox-sidebar">
+          <div class="lb-title" x-text="lightboxFile.title || fileNameWithoutExt(lightboxFile.original_name)"></div>
+          <div class="lb-summary" x-show="lightboxFile.summary" x-text="lightboxFile.summary"></div>
+          <div class="lb-tags" x-show="lightboxFile.tags">
+            <template x-for="tag in lightboxFile.tags.split(',')" :key="tag">
+              <span class="lb-tag" x-text="tag.trim()"></span>
+            </template>
+          </div>
+          <div class="lb-meta">
+            <span class="lb-label">Name</span><span class="lb-value" x-text="lightboxFile.original_name"></span>
+            <span class="lb-label">Size</span><span class="lb-value" x-text="formatBytes(lightboxFile.file_size)"></span>
+            <span class="lb-label">Type</span><span class="lb-value mono" x-text="lightboxFile.mime"></span>
+            <span class="lb-label">Category</span><span class="lb-value" x-text="lightboxFile.category || '—'"></span>
+            <span class="lb-label">Added</span><span class="lb-value" x-text="formatDate(lightboxFile.created_at)"></span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:auto;padding-top:16px;border-top:1px solid var(--border)">
+            <button class="btn btn-primary btn-sm btn-full" @click="triggerDownload(lightboxFile.id, lightboxFile.original_name)">Download</button>
+            <button class="btn btn-danger btn-sm btn-full" @click="deleteFromLightbox">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Delete confirmation modal -->
   <template x-if="deleteTarget">
     <div class="modal-overlay" @click="deleteTarget = null">
       <div class="modal" @click.stop>
@@ -96,10 +182,32 @@
         categories: [], totalFiles: 0, totalSize: '0 B', loading: true,
         showUpload: false, uploadError: '', uploading: false, dragOver: false,
         deleteTarget: null, deleting: false,
+        viewMode: localStorage.getItem('files_view') || 'grid',
+        activeFilter: 'all',
+        lightboxFile: null,
         async init() {
           initTheme(); renderNav('files');
           if (!getToken()) { window.location.href = 'index.html'; return; }
+          const params = new URLSearchParams(window.location.search);
+          const filterParam = params.get('filter');
+          if (filterParam) this.activeFilter = filterParam;
           await this.loadFiles();
+        },
+        get allCategories() {
+          return this.categories.map(c => c.name || 'Uncategorized');
+        },
+        get filteredCategories() {
+          if (this.activeFilter === 'all') return this.categories;
+          return this.categories.filter(c => c.name === this.activeFilter || (!c.name && this.activeFilter === 'Uncategorized'));
+        },
+        get filteredFiles() {
+          const all = [];
+          for (const cat of this.categories) {
+            if (this.activeFilter === 'all' || cat.name === this.activeFilter || (!cat.name && this.activeFilter === 'Uncategorized')) {
+              for (const f of (cat.files || [])) all.push(f);
+            }
+          }
+          return all;
         },
         async loadFiles() {
           this.loading = true;
@@ -107,7 +215,7 @@
             const inv = await getInventory();
             this.totalFiles = inv.total_files || 0;
             this.totalSize = formatBytes(inv.total_size || 0);
-            if (inv.categories) this.categories = inv.categories.map(c => ({ ...c, open: true }));
+            if (inv.categories) this.categories = inv.categories.map(c => ({ name: c.category, ...c, open: true }));
           } catch (e) { showError('loading-state', e.message); }
           finally { this.loading = false; }
         },
@@ -119,13 +227,26 @@
           catch (e) { this.uploadError = e.message; }
           finally { this.uploading = false; }
         },
-        confirmDelete(file) { this.deleteTarget = file; },
+        confirmDelete(file) { this.deleteTarget = file; this.lightboxFile = null; },
         async doDelete() {
           if (!this.deleteTarget) return;
           this.deleting = true;
           try { await deleteFile(this.deleteTarget.id); toast('File deleted'); this.deleteTarget = null; await this.loadFiles(); }
           catch (e) { toast(e.message, true); }
           finally { this.deleting = false; }
+        },
+        openLightbox(file) { this.lightboxFile = file; },
+        closeLightbox() { this.lightboxFile = null; },
+        async deleteFromLightbox() {
+          if (!this.lightboxFile) return;
+          this.deleting = true;
+          try { await deleteFile(this.lightboxFile.id); toast('File deleted'); this.lightboxFile = null; await this.loadFiles(); }
+          catch (e) { toast(e.message, true); }
+          finally { this.deleting = false; }
+        },
+        setView(mode) {
+          this.viewMode = mode;
+          localStorage.setItem('files_view', mode);
         }
       };
     }

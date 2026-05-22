@@ -606,6 +606,7 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
         .route("/ask", routing::post(handlers::ask_handler))
         .route("/inventory", routing::get(handlers::inventory_handler))
         .route("/download/:id", routing::get(handlers::download_handler))
+        .route("/files/:id/inline", routing::get(handlers::inline_handler))
         .route("/files/:id", routing::delete(handlers::delete_handler))
         .route("/archive/dl/:id", routing::get(handlers::archive_download_handler))
         .route("/sync-token", routing::post(handlers::sync_token_handler))
