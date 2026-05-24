@@ -20,7 +20,6 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use axum::{routing, Router};
 use clap::{Parser, Subcommand};
 #[cfg(feature = "iroh")]
@@ -33,7 +32,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::handlers::AppState;
@@ -457,7 +456,7 @@ async fn proxy_request(
 
 // ── Server mode ──────────────────────────────────────────────────────
 
-async fn run_server(config: config::Config, iroh_enabled: bool) {
+async fn run_server(config: config::Config, _iroh_enabled: bool) {
     info!("Starting AI Cloud Backpack");
     info!("LLM provider: {}", config.llm_provider);
     info!("LLM model: {}", config.llm_model);

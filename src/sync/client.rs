@@ -152,6 +152,7 @@ impl SyncClient {
     }
 }
 
+#[allow(dead_code)]
 fn urlencode(s: &str) -> String {
     s.replace('%', "%25").replace(' ', "%20")
         .replace('#', "%23").replace('&', "%26").replace('+', "%2B")

@@ -6,6 +6,8 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -22,18 +24,18 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             name: backpack-macos-aarch64
-          - os: windows-latest
+          - os: windows-2025
             target: x86_64-pc-windows-msvc
             name: backpack-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
-      - run: cp target/${{ matrix.target }}/release/backpack${{ matrix.os == 'windows-latest' && '.exe' || '' }} ${{ matrix.name }}
-      - uses: softprops/action-gh-release@v2
+      - run: cp "target/${{ matrix.target }}/release/backpack${{ matrix.os == 'windows-2025' && '.exe' || '' }}" "${{ matrix.name }}"
+      - uses: softprops/action-gh-release@v3
         with:
           files: ${{ matrix.name }}
           generate_release_notes: true

@@ -105,7 +105,9 @@ pub enum DeleteMode {
 pub struct SpaceManager {
     registry: SqlitePool,
     base_dir: PathBuf,
+    #[allow(dead_code)]
     default_pool: SqlitePool,
+    #[allow(dead_code)]
     default_upload_dir: String,
     pools: Arc<Mutex<HashMap<String, SqlitePool>>>,
 }

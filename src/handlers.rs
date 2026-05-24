@@ -605,7 +605,7 @@ pub async fn delete_handler(
         .await
         .map_err(|e| ApiError::new(format!("Failed to delete file record: {}", e)))?;
 
-    let _ = state.spaces.add_usage(&space.space_id, (file_size.max(0) as u64)).await;
+    let _ = state.spaces.add_usage(&space.space_id, file_size.max(0) as u64).await;
 
     info!("Deleted file: id={}, name={}", id, file.original_name);
 
@@ -776,7 +776,7 @@ pub async fn revoke_share_handler(
 
     // Validate that the owner_token is valid (resolves to a space).
     // This also ensures the space is active.
-    let space = resolve_space(&state, Some(body.owner_token.clone())).await?;
+    let _space = resolve_space(&state, Some(body.owner_token.clone())).await?;
 
     // Hard-delete the share token. SpaceManager validates ownership
     // by checking that the owner_token matches the space's owner.

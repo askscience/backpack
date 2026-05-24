@@ -13,7 +13,7 @@ const CHALLENGE_TTL_SECS: u64 = 300;
 
 pub struct WebauthnApp {
     pub webauthn: Webauthn,
-    pub origin: Url,
+    pub _origin: Url,
     pub challenges: Mutex<HashMap<String, (PasskeyRegistration, String, Instant)>>,
     pub auth_challenges: Mutex<HashMap<String, (PasskeyAuthentication, Instant)>>,
 }
@@ -28,7 +28,7 @@ impl WebauthnApp {
 
         Ok(Self {
             webauthn,
-            origin,
+            _origin: origin,
             challenges: Mutex::new(HashMap::new()),
             auth_challenges: Mutex::new(HashMap::new()),
         })
@@ -146,12 +146,14 @@ pub struct WebauthnAuthFinishRequest {
     pub credential: PublicKeyCredential,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebauthnStartResponse {
     pub challenge_id: String,
     pub public_key: serde_json::Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebauthnFinishResponse {
     pub session_token: String,
@@ -175,6 +177,7 @@ pub async fn store_passkey(pool: &sqlx::SqlitePool, user_id: &str, passkey: &Pas
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn get_passkeys(pool: &sqlx::SqlitePool, user_id: &str) -> Result<Vec<Passkey>> {
     let rows = sqlx::query("SELECT credential FROM webauthn_keys WHERE user_id = ?1")
         .bind(user_id)
@@ -190,6 +193,7 @@ pub async fn get_passkeys(pool: &sqlx::SqlitePool, user_id: &str) -> Result<Vec<
     Ok(keys)
 }
 
+#[allow(dead_code)]
 pub async fn has_passkey(pool: &sqlx::SqlitePool, user_id: &str) -> Result<bool> {
     let row = sqlx::query("SELECT COUNT(*) as cnt FROM webauthn_keys WHERE user_id = ?1")
         .bind(user_id)

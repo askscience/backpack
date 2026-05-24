@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tracing::info;
 
-use crate::handlers::{self, ApiError, AppState, TokenQuery};
+use crate::handlers::{self, ApiError, AppState};
 
 // ── Data types ──────────────────────────────────────────────────────
 
