@@ -5,8 +5,7 @@
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Redirect},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -423,57 +422,64 @@ pub async fn delete_sync_status(
 
 /// `GET /sync/daemon`
 ///
-/// Returns information about the sync daemon download. When a compiled
-/// binary is available at `./daemon/backpack-sync-{os}-{arch}`, it
-/// serves the binary. Otherwise returns JSON with build instructions.
-///
+/// Redirects to the latest GitHub release binary for the requested platform.
 /// Query params:
-/// - `os` — "linux", "macos", or "windows" (default: current platform)
-/// - `arch` — "x86_64" or "aarch64" (default: current architecture)
+/// - `os` — "linux", "macos", or "windows" (default: "linux")
+/// - `arch` — "x86_64" or "aarch64" (default: "x86_64")
 #[derive(Deserialize)]
 pub struct DaemonQuery {
-    #[serde(default)]
     pub os: Option<String>,
-    #[serde(default)]
     pub arch: Option<String>,
 }
 
 pub async fn download_daemon(
     Query(query): Query<DaemonQuery>,
-) -> Result<axum::response::Response, ApiError> {
-    let os = query.os.as_deref().unwrap_or(if cfg!(target_os = "macos") { "macos" } else if cfg!(target_os = "linux") { "linux" } else if cfg!(target_os = "windows") { "windows" } else { "linux" });
-    let arch = query.arch.as_deref().unwrap_or(if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" });
+) -> Redirect {
+    let os = query.os.as_deref().unwrap_or("linux");
+    let arch = query.arch.as_deref().unwrap_or("x86_64");
+    let ext = if os == "windows" { ".exe" } else { "" };
+    let filename = format!("backpack-{}-{}{}", os, arch, ext);
+    let url = format!(
+        "https://github.com/askscience/backpack/releases/latest/download/{}",
+        filename
+    );
+    Redirect::to(&url)
+}
 
-    let binary_path = format!("daemon/backpack-sync-{}-{}", os, arch);
-    let exe_path = if os == "windows" { format!("{}.exe", binary_path) } else { binary_path.clone() };
+/// `GET /sync/daemon/version`
+///
+/// Returns the latest daemon version and download URLs for all platforms.
+/// Reads the version from the compiled binary's `CARGO_PKG_VERSION`.
+#[derive(Serialize)]
+pub struct DaemonVersion {
+    pub latest_version: String,
+    pub download_url: String,
+    pub release_notes_url: String,
+    pub platforms: Vec<PlatformInfo>,
+}
 
-    if std::path::Path::new(&exe_path).exists() {
-        let data = tokio::fs::read(&exe_path).await
-            .map_err(|_| ApiError::new("Failed to read daemon binary"))?;
-        let filename = format!("backpack-sync-{}-{}{}", os, arch, if os == "windows" { ".exe" } else { "" });
-        let headers = [
-            (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
-            (axum::http::header::CONTENT_DISPOSITION, &format!("attachment; filename=\"{}\"", filename)),
-        ];
-        Ok(axum::response::Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/octet-stream")
-            .header("content-disposition", format!("attachment; filename=\"{}\"", filename))
-            .body(axum::body::Body::from(data))
-            .unwrap())
-    } else {
-        Ok(axum::response::Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(serde_json::json!({
-                "message": "Daemon binary not pre-built. Build it with:",
-                "build_command": "cargo build --release --bin backpack",
-                "run_command": "./target/release/backpack sync start",
-                "platforms": {
-                    "current": { "os": os, "arch": arch },
-                    "available": ["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64"]
-                }
-            }).to_string()))
-            .unwrap())
-    }
+#[derive(Serialize)]
+pub struct PlatformInfo {
+    pub os: String,
+    pub arch: String,
+    pub label: String,
+    pub url: String,
+}
+
+pub async fn daemon_version() -> Json<DaemonVersion> {
+    let ver = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let base = "https://github.com/askscience/backpack/releases/latest/download";
+
+    Json(DaemonVersion {
+        latest_version: ver.clone(),
+        download_url: "https://github.com/askscience/backpack/releases/latest".into(),
+        release_notes_url: format!("https://github.com/askscience/backpack/releases/tag/{}", ver),
+        platforms: vec![
+            PlatformInfo { os: "linux".into(), arch: "x86_64".into(), label: "Linux x86_64".into(), url: format!("{}/backpack-linux-x86_64", base) },
+            PlatformInfo { os: "linux".into(), arch: "aarch64".into(), label: "Linux ARM64".into(), url: format!("{}/backpack-linux-aarch64", base) },
+            PlatformInfo { os: "macos".into(), arch: "x86_64".into(), label: "macOS Intel".into(), url: format!("{}/backpack-macos-x86_64", base) },
+            PlatformInfo { os: "macos".into(), arch: "aarch64".into(), label: "macOS Apple Silicon".into(), url: format!("{}/backpack-macos-aarch64", base) },
+            PlatformInfo { os: "windows".into(), arch: "x86_64".into(), label: "Windows x86_64".into(), url: format!("{}/backpack-windows-x86_64.exe", base) },
+        ],
+    })
 }

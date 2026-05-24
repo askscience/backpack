@@ -13,6 +13,7 @@ function syncApp() {
     loading: true, saving: false,
     wsStatus: 'disconnected', liveEvents: [],
     watchDirInput: '', ignorePatternInput: '', statusFilter: 'all',
+    daemonLoading: true, platforms: [], daemonVersion: '', releaseNotesUrl: '',
 
     async init() {
       renderNav('sync');
@@ -43,6 +44,13 @@ function syncApp() {
       } catch (e) {
         toast('Failed to load sync data: ' + e.message, true);
       }
+      try {
+        const v = await apiRequest('/sync/daemon/version');
+        this.platforms = v.platforms || [];
+        this.daemonVersion = v.latest_version || '';
+        this.releaseNotesUrl = v.release_notes_url || '';
+      } catch (_) {}
+      this.daemonLoading = false;
       this.loading = false;
       this.connectWs();
     },

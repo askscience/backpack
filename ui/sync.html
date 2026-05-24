@@ -29,6 +29,30 @@
       <div class="loading"><div class="loading-spinner"></div></div>
     </div>
 
+    <!-- Daemon Download Section -->
+    <div class="section" x-show="!loading && !daemonLoading">
+      <div class="section-head">
+        <div class="section-title">Download Sync Daemon</div>
+      </div>
+      <p class="body-sm text-2 mt-8 mb-16">
+        The sync daemon watches a local folder and automatically syncs files
+        with this space. No Rust toolchain needed.
+      </p>
+      <div class="download-grid">
+        <template x-for="p in platforms" :key="p.label">
+          <a :href="p.url" class="download-card" target="_blank">
+            <div class="download-card-icon">↓</div>
+            <div class="download-card-label" x-text="p.label"></div>
+            <div class="download-card-os" x-text="p.os + '-' + p.arch"></div>
+          </a>
+        </template>
+      </div>
+      <div x-show="daemonVersion" class="mt-16 caption text-3">
+        Latest version: <span x-text="daemonVersion"></span>
+        · <a :href="releaseNotesUrl" target="_blank" style="text-decoration:underline">Release notes</a>
+      </div>
+    </div>
+
     <div x-show="!loading" x-transition>
 
       <!-- Status Cards -->

@@ -649,6 +649,7 @@ async fn run_server(config: config::Config, iroh_enabled: bool) {
             .post(sync_server::report_sync_status))
         .route("/sync/status/:path", routing::delete(sync_server::delete_sync_status))
         .route("/sync/daemon", routing::get(sync_server::download_daemon))
+        .route("/sync/daemon/version", routing::get(sync_server::daemon_version))
         .route("/", routing::get(|| async {
             axum::Json(serde_json::json!({
                 "name": "AI Cloud Backpack",
