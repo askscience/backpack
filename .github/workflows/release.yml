@@ -7,6 +7,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -30,7 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }} --features iroh
+      - run: cargo build --release --target ${{ matrix.target }}
       - run: cp target/${{ matrix.target }}/release/backpack${{ matrix.os == 'windows-latest' && '.exe' || '' }} ${{ matrix.name }}
       - uses: softprops/action-gh-release@v2
         with:
