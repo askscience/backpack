@@ -1,5 +1,21 @@
+// Apply saved theme as early as possible (default: dark cyber).
+(function applyThemeEarly() {
+  const saved = localStorage.getItem('theme');
+  document.documentElement.setAttribute('data-theme', saved === 'light' ? 'light' : 'dark');
+})();
+
+// Load the kinetic effects engine on every page (components.js is universal).
+(function loadEffects() {
+  if (document.querySelector('script[data-cy-effects]')) return;
+  const s = document.createElement('script');
+  s.src = 'js/effects.js';
+  s.defer = true;
+  s.setAttribute('data-cy-effects', '');
+  (document.head || document.documentElement).appendChild(s);
+})();
+
 function getTheme() {
-  return localStorage.getItem('theme') || 'light';
+  return localStorage.getItem('theme') || 'dark';
 }
 
 function setTheme(theme) {
@@ -13,11 +29,8 @@ function toggleTheme() {
 }
 
 function initTheme() {
-  const saved = getTheme();
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const theme = saved !== 'light' && saved !== 'dark'
-    ? (prefersDark ? 'dark' : 'light')
-    : saved;
+  const saved = localStorage.getItem('theme');
+  const theme = saved === 'light' ? 'light' : 'dark';
   setTheme(theme);
 }
 

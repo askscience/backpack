@@ -456,6 +456,46 @@ async fn proxy_request(
 
 // ── Server mode ──────────────────────────────────────────────────────
 
+/// Attach baseline security headers to every response. Handlers that need
+/// a stricter policy (e.g. file downloads set `default-src 'none'; sandbox`)
+/// set their own headers first; we only fill in what's missing.
+async fn add_security_headers(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::header::{self, HeaderName, HeaderValue};
+
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+
+    fn set_if_absent(h: &mut axum::http::HeaderMap, name: HeaderName, val: &'static str) {
+        if !h.contains_key(&name) {
+            h.insert(name, HeaderValue::from_static(val));
+        }
+    }
+
+    set_if_absent(headers, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    set_if_absent(headers, header::X_FRAME_OPTIONS, "DENY");
+    // `no-referrer` keeps any `?token=` query strings out of the Referer
+    // header sent to third parties (fonts/CDN).
+    set_if_absent(headers, header::REFERRER_POLICY, "no-referrer");
+    // CSP tuned for the SPA: Alpine.js needs 'unsafe-eval'; styles/fonts
+    // come from Google Fonts; the API and WebSocket live on the same origin.
+    set_if_absent(
+        headers,
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'self'; \
+         script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+         font-src 'self' https://fonts.gstatic.com; \
+         img-src 'self' data: blob:; \
+         connect-src 'self' ws: wss:; \
+         object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    );
+
+    res
+}
+
 async fn run_server(config: config::Config, _iroh_enabled: bool) {
     info!("Starting AI Cloud Backpack");
     info!("LLM provider: {}", config.llm_provider);
@@ -463,11 +503,6 @@ async fn run_server(config: config::Config, _iroh_enabled: bool) {
     info!("Embedding model: {}", config.embedding_model);
     info!("Upload dir: {}", config.upload_dir);
     info!("DB path: {}", config.db_path);
-    if let Some(ref token) = config.admin_token {
-        info!("Admin token: {}", token);
-        info!("Use this token in the UI Admin login to manage spaces.");
-    }
-
     let _skill_content = catalog::read_skill_prompt(&config.skill_path).unwrap_or_else(|e| {
         tracing::warn!("Could not read skill.md: {}. Using default prompt.", e);
         String::new()
@@ -524,9 +559,17 @@ async fn run_server(config: config::Config, _iroh_enabled: bool) {
     });
 
     if let Some(ref token) = config.admin_token {
-        info!("Admin token: {}", token);
-        info!("Use this token in the UI to register for admin access.");
-        info!("Save this token now — it will not be shown again.");
+        if config.admin_token_generated {
+            // Ephemeral token: the operator has no other copy, so print it
+            // once to the console (stderr) rather than burying it in logs.
+            eprintln!("\n  Admin token (generated, save it now — not shown again):\n    {}\n", token);
+            info!("Use this token in the UI to register for admin access.");
+        } else {
+            // Operator-supplied secret: never log it in full.
+            use sha2::{Digest, Sha256};
+            let fp = hex::encode(Sha256::digest(token.as_bytes()));
+            info!("Admin token configured from ADMIN_TOKEN (sha256: {}…)", &fp[..12]);
+        }
     }
 
     let client = Client::builder()
@@ -649,7 +692,7 @@ async fn run_server(config: config::Config, _iroh_enabled: bool) {
         .route("/sync/status/:path", routing::delete(sync_server::delete_sync_status))
         .route("/sync/daemon", routing::get(sync_server::download_daemon))
         .route("/sync/daemon/version", routing::get(sync_server::daemon_version))
-        .route("/", routing::get(|| async {
+        .route("/api/info", routing::get(|| async {
             axum::Json(serde_json::json!({
                 "name": "AI Cloud Backpack",
                 "endpoints": {
@@ -667,6 +710,21 @@ async fn run_server(config: config::Config, _iroh_enabled: bool) {
         .layer(RequestBodyLimitLayer::new(max_bytes as usize))
         .layer(cors)
         .with_state(state);
+
+    // ── Static web UI ────────────────────────────────────────────────
+    // Serve the bundled front-end (the `ui/` directory) directly from the
+    // server so a single `cargo run --release` boots the whole experience
+    // at the bind address. Unknown paths fall through to index.html.
+    let ui_dir = std::env::var("UI_DIR").unwrap_or_else(|_| "ui".into());
+    let app = {
+        use tower_http::services::{ServeDir, ServeFile};
+        let index = format!("{}/index.html", ui_dir.trim_end_matches('/'));
+        let serve_ui = ServeDir::new(&ui_dir)
+            .append_index_html_on_directories(true)
+            .not_found_service(ServeFile::new(index));
+        app.fallback_service(serve_ui)
+            .layer(axum::middleware::from_fn(add_security_headers))
+    };
 
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     info!("HTTP listening on {}", addr);

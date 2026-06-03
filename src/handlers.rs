@@ -64,6 +64,10 @@ impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self { error: msg.into(), status: 400 }
     }
+
+    pub fn too_many(msg: impl Into<String>) -> Self {
+        Self { error: msg.into(), status: 429 }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -95,7 +99,9 @@ impl RateLimiter {
     }
 
     pub fn check(&self, key: &str, max_per_min: usize) -> bool {
-        let mut windows = self.windows.lock().unwrap();
+        // Recover from a poisoned lock instead of panicking: a single
+        // panic elsewhere must not turn the limiter into a permanent 500.
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let entries = windows.entry(key.to_string()).or_default();
         entries.retain(|t| now.duration_since(*t).as_secs() < 60);
@@ -198,6 +204,10 @@ pub async fn upload_handler(
 
     if space.read_only() {
         return Err(ApiError::forbidden("Read-only share token cannot upload files"));
+    }
+
+    if !state.rate_limiter.check(&format!("upload:{}", space.space_id), 60) {
+        return Err(ApiError::too_many("Too many uploads, slow down"));
     }
 
     let mut files: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
@@ -454,6 +464,12 @@ pub async fn search_handler(
     let token = extract_bearer_token(&headers).or(query.token);
     let space = resolve_space(&state, token).await?;
 
+    // Search hits the embedding model — throttle per space to prevent
+    // anyone with a token from running up unbounded model costs.
+    if !state.rate_limiter.check(&format!("search:{}", space.space_id), 30) {
+        return Err(ApiError::too_many("Too many searches, slow down"));
+    }
+
     if query.q.trim().is_empty() {
         return Ok(Json(SearchResponse {
             query: query.q,
@@ -496,6 +512,58 @@ pub async fn inventory_handler(
     }))
 }
 
+/// Strip characters that are unsafe inside an HTTP header value (control
+/// chars, quotes, backslashes) so a crafted `original_name` cannot break
+/// out of the `Content-Disposition` quoting or inject header bytes.
+fn header_safe_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
+        .take(255)
+        .collect();
+    if cleaned.trim().is_empty() {
+        "download".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Whether a stored file may be rendered `inline` in the browser without
+/// risking script execution on the app's origin. Everything else is forced
+/// to download as an attachment. Note SVG is excluded because it can carry
+/// embedded scripts.
+fn is_inline_safe(mime: &str) -> bool {
+    let m = mime.trim().to_ascii_lowercase();
+    (m.starts_with("image/") && m != "image/svg+xml")
+        || m.starts_with("video/")
+        || m.starts_with("audio/")
+        || m == "application/pdf"
+        || m == "text/plain"
+}
+
+/// Hardened headers attached to every file response: prevent MIME
+/// sniffing, forbid framing/script execution, and avoid leaking tokens
+/// in the `Referer` of any subresource the file might try to load.
+fn file_security_headers() -> [(header::HeaderName, &'static str); 4] {
+    [
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox; frame-ancestors 'none'",
+        ),
+        (header::X_FRAME_OPTIONS, "DENY"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ]
+}
+
+async fn open_stream(path: &str) -> Result<axum::body::Body, ApiError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ApiError::new(format!("Failed to read file: {}", e)))?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    Ok(axum::body::Body::from_stream(stream))
+}
+
 pub async fn download_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -515,36 +583,38 @@ pub async fn download_handler(
         return Err(ApiError::not_found("File not found on disk"));
     }
 
-    async {
-        let data = tokio::fs::read(&file.file_path)
-            .await
-            .map_err(|e| ApiError::new(format!("Failed to read file: {}", e)))?;
+    let mime: mime_guess::Mime = file
+        .mime
+        .parse()
+        .unwrap_or(mime_guess::mime::APPLICATION_OCTET_STREAM);
 
-        let mime: mime_guess::Mime = file
-            .mime
-            .parse()
-            .unwrap_or(mime_guess::mime::APPLICATION_OCTET_STREAM);
+    let filename = header_safe_filename(&file.original_name);
+    let body = open_stream(&file.file_path).await?;
 
-        let filename = file.original_name.clone();
-        let headers = [
-            (header::CONTENT_TYPE, mime.to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", filename),
-            ),
-        ];
+    let sec = file_security_headers();
+    let response_headers = [
+        (header::CONTENT_TYPE, mime.to_string()),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        ),
+        (sec[0].0.clone(), sec[0].1.to_string()),
+        (sec[1].0.clone(), sec[1].1.to_string()),
+        (sec[2].0.clone(), sec[2].1.to_string()),
+        (sec[3].0.clone(), sec[3].1.to_string()),
+    ];
 
-        Ok::<_, ApiError>((headers, data))
-    }
-    .await
+    Ok::<_, ApiError>((response_headers, body))
 }
 
 pub async fn inline_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let token = extract_bearer_token(&headers);
+    let token = extract_bearer_token(&headers)
+        .or_else(|| params.get("token").cloned());
     let space = resolve_space(&state, token).await?;
 
     let file = db::get_file(&space.pool, &id)
@@ -556,20 +626,30 @@ pub async fn inline_handler(
         return Err(ApiError::not_found("File not found on disk"));
     }
 
-    let data = tokio::fs::read(&file.file_path)
-        .await
-        .map_err(|e| ApiError::new(format!("Failed to read file: {}", e)))?;
-
     let mime_str = file.mime.clone();
-    let headers = [
+    let filename = header_safe_filename(&file.original_name);
+
+    // Only render known-safe media inline; anything that could execute
+    // script on our origin (HTML, SVG, unknown types) is forced to download.
+    let disposition = if is_inline_safe(&mime_str) {
+        format!("inline; filename=\"{}\"", filename)
+    } else {
+        format!("attachment; filename=\"{}\"", filename)
+    };
+
+    let body = open_stream(&file.file_path).await?;
+
+    let sec = file_security_headers();
+    let response_headers = [
         (header::CONTENT_TYPE, mime_str),
-        (
-            header::CONTENT_DISPOSITION,
-            format!("inline; filename=\"{}\"", file.original_name),
-        ),
+        (header::CONTENT_DISPOSITION, disposition),
+        (sec[0].0.clone(), sec[0].1.to_string()),
+        (sec[1].0.clone(), sec[1].1.to_string()),
+        (sec[2].0.clone(), sec[2].1.to_string()),
+        (sec[3].0.clone(), sec[3].1.to_string()),
     ];
 
-    Ok::<_, ApiError>((headers, data))
+    Ok::<_, ApiError>((response_headers, body))
 }
 
 pub async fn delete_handler(
@@ -653,6 +733,12 @@ pub async fn ask_handler(
 ) -> Result<Json<AskResponse>, ApiError> {
     let token = extract_bearer_token(&headers);
     let space = resolve_space(&state, token).await?;
+
+    // RAG questions trigger an embedding call plus a full LLM completion;
+    // keep the per-space ceiling tighter than search.
+    if !state.rate_limiter.check(&format!("ask:{}", space.space_id), 20) {
+        return Err(ApiError::too_many("Too many questions, slow down"));
+    }
 
     if body.question.trim().is_empty() {
         return Err(ApiError::bad_request("Question cannot be empty"));
@@ -958,22 +1044,28 @@ pub async fn archive_download_handler(
         }
     }
 
-    let data = tokio::fs::read(&zip_path)
-        .await
-        .map_err(|e| ApiError::new(format!("Failed to read archive: {}", e)))?;
+    let body = open_stream(&zip_path).await?;
 
     let filename = format!("{}.zip", download_token);
-    let headers = [
+    let sec = file_security_headers();
+    let response_headers = [
         (header::CONTENT_TYPE, "application/zip".to_string()),
         (
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{}\"", filename),
         ),
+        (sec[0].0.clone(), sec[0].1.to_string()),
+        (sec[1].0.clone(), sec[1].1.to_string()),
+        (sec[2].0.clone(), sec[2].1.to_string()),
+        (sec[3].0.clone(), sec[3].1.to_string()),
     ];
 
+    // One-shot link: mark consumed and remove the on-disk archive so the
+    // exported copy of a (possibly deleted) space doesn't linger.
     let _ = state.spaces.mark_archive_downloaded(&download_token).await;
+    let _ = tokio::fs::remove_file(&zip_path).await;
 
-    Ok((headers, data))
+    Ok((response_headers, body))
 }
 
 // ── WebAuthn ─────────────────────────────────────────────────────
@@ -999,7 +1091,7 @@ pub async fn webauthn_register_finish(
     Json(body): Json<webauthn::WebauthnRegisterFinishRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = {
-        state.webauthn.challenges.lock().unwrap()
+        state.webauthn.challenges.lock().unwrap_or_else(|e| e.into_inner())
             .get(&body.challenge_id)
             .map(|(_, uid, _)| uid.clone())
             .ok_or_else(|| ApiError::bad_request("Session lost — please try again"))?
@@ -1058,10 +1150,20 @@ pub async fn webauthn_auth_finish(
         .finish_authentication(&body.challenge_id, &body.credential)
         .map_err(|e| ApiError::forbidden(format!("Auth failed: {}", e)))?;
 
-    let user_id = webauthn::find_user_by_credential(&state.pool, result.cred_id())
-        .await
-        .map_err(|e| ApiError::new(format!("Lookup failed: {}", e)))?
-        .unwrap_or_default();
+    // Bind the assertion to a registered credential. If the credential is
+    // not one we issued, reject instead of minting a session for an empty
+    // user id.
+    let (user_id, mut passkey) =
+        webauthn::find_user_and_passkey_by_credential(&state.pool, result.cred_id())
+            .await
+            .map_err(|e| ApiError::new(format!("Lookup failed: {}", e)))?
+            .ok_or_else(|| ApiError::forbidden("Unknown credential"))?;
+
+    // Persist the updated signature counter / backup state so a cloned
+    // authenticator (replayed assertion) can be detected on the next login.
+    if passkey.update_credential(&result).is_some() {
+        let _ = webauthn::store_passkey(&state.pool, &user_id, &passkey).await;
+    }
 
     let role = if user_id == "admin" { "admin" } else { "user" };
     let session = webauthn::create_session(&state.pool, &user_id, role)
@@ -1122,7 +1224,7 @@ pub async fn webauthn_logout(
 
 async fn resolve_user_from_token(state: &AppState, token: &str) -> Result<String, ApiError> {
     if let Some(admin_token) = &state.config.admin_token {
-        if token == admin_token.as_str() {
+        if crate::admin::constant_time_eq(token.as_bytes(), admin_token.as_bytes()) {
             return Ok("admin".to_string());
         }
     }
@@ -1146,12 +1248,13 @@ pub struct CreateShareRequest {
 pub async fn create_space_share(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(TokenQuery { token: query_token }): Query<TokenQuery>,
     Json(body): Json<CreateShareRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if body.label.len() > 256 {
         return Err(ApiError::bad_request("Label too long (max 256 characters)"));
     }
-    let token = extract_bearer_token(&headers).unwrap_or_default();
+    let token = extract_bearer_token(&headers).or(query_token).unwrap_or_default();
     let share = state
         .spaces
         .share(&token, &body.label)
@@ -1164,8 +1267,9 @@ pub async fn create_space_share(
 pub async fn list_space_shares(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(TokenQuery { token: query_token }): Query<TokenQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = extract_bearer_token(&headers).unwrap_or_default();
+    let token = extract_bearer_token(&headers).or(query_token).unwrap_or_default();
     let shares = state
         .spaces
         .list_shares_for_owner(&token)
@@ -1178,8 +1282,9 @@ pub async fn list_space_shares(
 pub async fn revoke_all_space_shares(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    Query(TokenQuery { token: query_token }): Query<TokenQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = extract_bearer_token(&headers).unwrap_or_default();
+    let token = extract_bearer_token(&headers).or(query_token).unwrap_or_default();
     let count = state
         .spaces
         .revoke_all_shares(&token)

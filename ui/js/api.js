@@ -1,4 +1,5 @@
-const API_BASE_URL = localStorage.getItem('api_base_url') || 'http://localhost:8080';
+const API_BASE_URL = localStorage.getItem('api_base_url')
+  || (location.protocol.startsWith('http') ? location.origin : 'http://localhost:8080');
 
 function setApiBaseUrl(url) {
   localStorage.setItem('api_base_url', url);

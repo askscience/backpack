@@ -37,11 +37,11 @@ impl WebauthnApp {
     pub fn purge_expired_challenges(&self) {
         let now = Instant::now();
         {
-            let mut reg = self.challenges.lock().unwrap();
+            let mut reg = self.challenges.lock().unwrap_or_else(|e| e.into_inner());
             reg.retain(|_, (_, _, ts)| now.duration_since(*ts).as_secs() < CHALLENGE_TTL_SECS);
         }
         {
-            let mut auth = self.auth_challenges.lock().unwrap();
+            let mut auth = self.auth_challenges.lock().unwrap_or_else(|e| e.into_inner());
             auth.retain(|_, (_, ts)| now.duration_since(*ts).as_secs() < CHALLENGE_TTL_SECS);
         }
     }
@@ -66,7 +66,7 @@ impl WebauthnApp {
 
         self.challenges
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(challenge_id.clone(), (reg_state, user_id.to_string(), Instant::now()));
 
         Ok((ccr, challenge_id))
@@ -80,7 +80,7 @@ impl WebauthnApp {
         let (reg_state, _user_id, _ts) = self
             .challenges
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .remove(challenge_id)
             .context("Registration challenge not found or expired")?;
 
@@ -102,7 +102,7 @@ impl WebauthnApp {
 
         self.auth_challenges
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(challenge_id.clone(), (auth_state, Instant::now()));
 
         Ok((rcr, challenge_id))
@@ -116,7 +116,7 @@ impl WebauthnApp {
         let (auth_state, _ts) = self
             .auth_challenges
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .remove(challenge_id)
             .context("Authentication challenge not found or expired")?;
 
@@ -202,6 +202,17 @@ pub async fn has_passkey(pool: &sqlx::SqlitePool, user_id: &str) -> Result<bool>
     Ok(row.get::<i64, _>("cnt") > 0)
 }
 
+/// Hash a bearer token for storage. We only ever persist the SHA-256
+/// digest of session tokens so a database/backup leak cannot be replayed
+/// to hijack live sessions — the raw token is returned to the client once
+/// and never written to disk.
+fn hash_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 pub async fn create_session(
     pool: &sqlx::SqlitePool,
     user_id: &str,
@@ -217,7 +228,7 @@ pub async fn create_session(
     sqlx::query(
         "INSERT INTO sessions (session_token, user_id, role, expires_at) VALUES (?1, ?2, ?3, ?4)",
     )
-    .bind(&token)
+    .bind(hash_token(&token))
     .bind(user_id)
     .bind(role)
     .bind(&expires)
@@ -234,17 +245,21 @@ pub async fn resolve_session(
     let row = sqlx::query(
         "SELECT user_id, role FROM sessions WHERE session_token = ?1 AND expires_at > datetime('now')",
     )
-    .bind(token)
+    .bind(hash_token(token))
     .fetch_optional(pool)
     .await?;
 
     Ok(row.map(|r| (r.get("user_id"), r.get("role"))))
 }
 
-pub async fn find_user_by_credential(
+/// Look up both the owning `user_id` and the stored `Passkey` for a given
+/// credential id. Used after authentication so we can (a) reject assertions
+/// from credentials that aren't registered and (b) persist the updated
+/// signature counter for replay/clone detection.
+pub async fn find_user_and_passkey_by_credential(
     pool: &sqlx::SqlitePool,
     cred_id: &CredentialID,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, Passkey)>> {
     let rows = sqlx::query("SELECT user_id, credential FROM webauthn_keys")
         .fetch_all(pool)
         .await?;
@@ -253,7 +268,7 @@ pub async fn find_user_by_credential(
         let bytes: Vec<u8> = row.get("credential");
         if let Ok(key) = serde_json::from_slice::<Passkey>(&bytes) {
             if key.cred_id() == cred_id {
-                return Ok(Some(row.get("user_id")));
+                return Ok(Some((row.get("user_id"), key)));
             }
         }
     }
@@ -262,7 +277,7 @@ pub async fn find_user_by_credential(
 
 pub async fn delete_session(pool: &sqlx::SqlitePool, token: &str) -> Result<()> {
     sqlx::query("DELETE FROM sessions WHERE session_token = ?1")
-        .bind(token)
+        .bind(hash_token(token))
         .execute(pool)
     .await?;
 

@@ -80,26 +80,14 @@ function isImage(mime) {
 }
 
 function getInlineUrl(fileId) {
-  return `${API_BASE_URL}/files/${fileId}/inline`;
+  const token = localStorage.getItem('space_token');
+  const q = token ? `?token=${encodeURIComponent(token)}` : '';
+  return `${API_BASE_URL}/files/${fileId}/inline${q}`;
 }
 
 function cardGradient(mime) {
-  if (!mime) return 'linear-gradient(135deg, #1a1a2e, #0f3460)';
-  const m = mime.toLowerCase();
-  if (m.startsWith('video/')) return 'linear-gradient(135deg, #1a1a2e, #16213e)';
-  if (m.startsWith('audio/')) return 'linear-gradient(135deg, #1a1a2e, #2d1b69)';
-  if (m.includes('pdf')) return 'linear-gradient(135deg, #2d1b69, #16213e)';
-  if (m.includes('spreadsheet') || m.includes('excel') || m.includes('xlsx') || m.includes('csv'))
-    return 'linear-gradient(135deg, #0f3460, #1a1a2e)';
-  if (m.includes('presentation') || m.includes('powerpoint') || m.includes('pptx'))
-    return 'linear-gradient(135deg, #2d1b69, #0f3460)';
-  if (m.includes('document') || m.includes('word') || m.includes('docx'))
-    return 'linear-gradient(135deg, #16213e, #0f3460)';
-  if (m.includes('zip') || m.includes('tar') || m.includes('gzip') || m.includes('compress'))
-    return 'linear-gradient(135deg, #2d1b69, #1a1a2e)';
-  if (m.includes('text') || m.includes('json') || m.includes('xml') || m.includes('code') || m.includes('javascript') || m.includes('python'))
-    return 'linear-gradient(135deg, #0f3460, #1a1a2e)';
-  return 'linear-gradient(135deg, #1a1a2e, #0f3460)';
+  // Monochrome, flat: a subtle neutral wash for icon tiles.
+  return 'linear-gradient(135deg, var(--bg-2), var(--bg-3))';
 }
 
 function fileNameWithoutExt(name) {

@@ -261,6 +261,9 @@ pub async fn download_sync_config(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // The sync daemon must talk to *this* server, not the LLM endpoint.
+    let server_url = state.config.webauthn_origin.trim_end_matches('/').to_string();
+
     let toml_content = format!(
         r#"# Backpack Sync Configuration
 # Generated for space: {}
@@ -276,9 +279,9 @@ debounce_ms = {}
 ignore_patterns = [{}]
 "#,
         space.space_id,
-        state.config.llm_endpoint.replace("/v1", ""),
+        server_url,
         watch_dir,
-        state.config.llm_endpoint.replace("/v1", "").replace("https://", "http://"),
+        server_url,
         poll_interval,
         debounce,
         ignores_str,

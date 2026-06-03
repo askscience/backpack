@@ -18,6 +18,10 @@ pub struct Config {
     /// Bearer token for admin API endpoints (spaces CRUD). When `None`,
     /// all `/api/admin/*` routes return 404, revealing no information.
     pub admin_token: Option<String>,
+    /// Whether `admin_token` was auto-generated (no `ADMIN_TOKEN` env set).
+    /// A generated token is ephemeral, so it is printed once at startup;
+    /// an operator-supplied token is never logged in full.
+    pub admin_token_generated: bool,
     /// WebAuthn RP ID (e.g. "localhost" or "backpack.example.com")
     pub webauthn_rp_id: String,
     /// WebAuthn RP origin (e.g. "http://localhost:8080")
@@ -55,15 +59,12 @@ impl Config {
 
         // Admin token: when set from env, uses that; otherwise generates a random one.
         // The generated token is printed at startup so admins can use the UI.
-        let admin_token = Some(
-            env::var("ADMIN_TOKEN")
-                .ok()
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| {
-                    use uuid::Uuid;
-                    format!("bp-admin-{}", Uuid::new_v4())
-                }),
-        );
+        let env_admin_token = env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty());
+        let admin_token_generated = env_admin_token.is_none();
+        let admin_token = Some(env_admin_token.unwrap_or_else(|| {
+            use uuid::Uuid;
+            format!("bp-admin-{}", Uuid::new_v4())
+        }));
 
         Ok(Config {
             llm_provider,
@@ -81,6 +82,7 @@ impl Config {
             skill_path: env::var("SKILL_PATH").unwrap_or_else(|_| "./skill.md".into()),
             vosk_model_path: env::var("VOSK_MODEL_PATH").unwrap_or_else(|_| "/opt/vosk-model".into()),
             admin_token,
+            admin_token_generated,
             webauthn_rp_id: env::var("WEBAUTHN_RP_ID").unwrap_or_else(|_| "localhost".into()),
             webauthn_origin: env::var("WEBAUTHN_ORIGIN").unwrap_or_else(|_| "http://localhost:8080".into()),
         })

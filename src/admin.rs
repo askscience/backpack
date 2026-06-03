@@ -91,7 +91,7 @@ fn not_found_response() -> axum::response::Response<axum::body::Body> {
 /// Prevents timing side-channel attacks by ensuring comparison
 /// takes the same amount of time regardless of where the first
 /// differing byte occurs.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
